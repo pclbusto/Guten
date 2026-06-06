@@ -1,0 +1,18 @@
+[package]
+name = "folio"
+version = "0.1.0"
+edition = "2021"
+authors = ["GutenReader Team"]
+description = "Lector de EPUB con GTK4 + libadwaita + WebKit"
+
+[dependencies]
+gutencore = { package = "rubrica", path = "../Rubrica" }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+libadwaita = { version = "0.9", features = ["v1_9"] }
+webkit6 = { version = "0.6", features = ["v2_50"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+anyhow = "1.0"
+sha2 = "0.10"
+zip = "0.6"

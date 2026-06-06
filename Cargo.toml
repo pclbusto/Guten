@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "Folio",
+    "Rubrica",
+    "Rubrica-gtk",
+    "Scriptorium",
+    "Scriptorium/scriptorium-gtk",
+    "Scriptorium/scriptorium-pdf-pipeline"
+]
+resolver = "2"

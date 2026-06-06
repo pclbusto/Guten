@@ -1,0 +1,13 @@
+[package]
+name = "scriptorium-gtk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+libadwaita = { version = "0.9", features = ["v1_4"] }
+gdk-pixbuf = "0.22"
+tokio = { version = "1.37", features = ["full"] }
+scriptorium = { path = "../" }
+gutencore = { package = "rubrica", path = "../../Rubrica" }
+qrcode = "0.14"
