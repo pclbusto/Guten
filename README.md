@@ -113,16 +113,27 @@ cargo clippy --workspace --all-targets
 
 ## Capturas
 
-Todavía no hay capturas verificadas de las aplicaciones en el repositorio. Se
-añadirán cuando las interfaces principales tengan un flujo reproducible. Los
-logos de `assets/` son identidad visual y no representan el estado de la UI.
+Interfaz temprana; el diseño y las funciones todavía pueden cambiar.
+
+### Scriptorium — biblioteca
+
+![Biblioteca de Scriptorium en vista de tarjetas](screenshoots/guten-capturas-001.png)
+
+### Rúbrica — editor y vista previa
+
+![Editor EPUB de Rúbrica con vista previa](screenshoots/guten-capturas-003.png)
+
+### Folio — lectura
+
+![Lector Folio mostrando un capítulo](screenshoots/guten-capturas-009.png)
 
 ## Roadmap
 
 - [ ] Estabilizar el modelo EPUB compartido y cubrirlo con pruebas de regresión.
 - [ ] Unificar nombres, rutas de datos y configuración entre GTK4 y COSMIC.
 - [ ] Completar los flujos principales de Folio, Rúbrica y Scriptorium.
-- [ ] Añadir capturas reproducibles y documentación de uso por aplicación.
+- [x] Añadir primeras capturas de las aplicaciones.
+- [ ] Ampliar la documentación de uso de cada aplicación.
 - [ ] Automatizar compilación, pruebas y lint en CI.
 - [ ] Definir paquetes para Pop!_OS/Ubuntu y otros escritorios Linux.
 - [ ] Publicar una primera versión pre-release con changelog y binarios.
