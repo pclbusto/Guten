@@ -1,41 +1,137 @@
 <div align="center">
-  <img src="assets/Guten-Logo.png" alt="Guten Logo" width="250" />
-  <h1>Guten Suite</h1>
-  <p>Una suite integral de aplicaciones para la gestión, lectura y creación de documentos y libros electrónicos.</p>
-  <p><b>🚧 Proyecto en Desarrollo Activo 🚧</b></p>
+  <img src="assets/Guten-Logo.png" alt="Logo de Guten" width="250">
+  <h1>Guten</h1>
+  <p>Suite de escritorio en Rust para editar, organizar y leer libros EPUB.</p>
+  <p><strong>Estado: pre-alpha, en desarrollo activo.</strong></p>
 </div>
 
----
+## Qué es Guten
 
-**Guten** es una colección compuesta por 3 aplicaciones fundamentales, diseñadas para abarcar el ciclo completo de los libros electrónicos: desde la escritura y creación, pasando por la gestión de la biblioteca, hasta la lectura inmersiva.
+Guten reúne tres aplicaciones que cubren el ciclo de trabajo de una biblioteca
+digital. Los nombres y responsabilidades son:
 
-<br>
+| Aplicación | Función | Implementaciones actuales |
+|---|---|---|
+| **Folio** | Lector de EPUB | GTK4/WebKit (`Folio`) y COSMIC (`Folio-cosmic`) |
+| **Rúbrica** | Motor y editor de EPUB | Core Rust (`Rubrica`), GTK4 (`Rubrica-gtk`) y COSMIC (`Rubrica-cosmic`) |
+| **Scriptorium** | Gestor de biblioteca | CLI/servidor (`Scriptorium`), GTK4 y COSMIC |
 
-### 📚 Rúbrica (Manager)
-<img src="assets/Guten-Manager-Logo.png" alt="Rúbrica Logo" width="120" align="left" style="margin-right: 20px; border-radius: 10px;"/>
+`visore` es un componente auxiliar para visualizar y recortar imágenes desde
+las interfaces COSMIC.
 
-**Rúbrica** es el potente administrador de bibliotecas de la suite. Permite importar, organizar, buscar y servir tus colecciones de libros de manera eficiente. Cuenta tanto con una interfaz gráfica (GTK) como con una potente interfaz de línea de comandos.
+## Arquitectura
 
-<br clear="left"/>
+```text
+Guten
+├── Rubrica/                         Core EPUB compartido (gutencore)
+├── Rubrica-gtk/                     Editor GTK4 + Libadwaita
+├── Rubrica-cosmic/                  Editor COSMIC
+├── Folio/                           Lector GTK4 + WebKitGTK
+├── Folio-cosmic/                    Lector COSMIC con renderizado propio
+├── Scriptorium/                     Biblioteca SQLite, CLI, OPDS e importación
+│   ├── scriptorium-gtk/             Cliente GTK4
+│   ├── scriptorium-iced/            Cliente COSMIC
+│   └── scriptorium-pdf-pipeline/    Importación y análisis de PDF
+└── visore/                          Visor de imágenes reutilizable
+```
 
-### 📖 Folio (Reader)
-<img src="assets/Guten-Reader-Logo.png" alt="Folio Logo" width="120" align="left" style="margin-right: 20px; border-radius: 10px;"/>
+Las capas se relacionan así:
 
-**Folio** es el lector principal de la suite. Un entorno limpio y personalizable enfocado en brindarte la experiencia de lectura más cómoda posible, soportando múltiples formatos de libros electrónicos.
+1. **Rúbrica** abre, valida, modifica y exporta EPUB.
+2. **Scriptorium** usa Rúbrica para importar libros y mantiene el catálogo en
+   SQLite con búsqueda FTS5, deduplicación y servicio OPDS.
+3. **Folio** usa Rúbrica para interpretar el EPUB y presentar su contenido.
+4. Las variantes GTK4 y COSMIC son clientes de esos núcleos; no son productos
+   con responsabilidades diferentes.
 
-<br clear="left"/>
+## Estado de las aplicaciones
 
-### 🖋️ Scriptorium (Writer)
-<img src="assets/Guten-Writer-Logo.png" alt="Scriptorium Logo" width="120" align="left" style="margin-right: 20px; border-radius: 10px;"/>
+| Componente | Estado actual |
+|---|---|
+| Rúbrica core | Funcional: estructura EPUB 3, recursos, navegación, saneamiento XHTML y exportación |
+| Rúbrica GTK4 | Prototipo funcional de edición y previsualización |
+| Rúbrica COSMIC | Prototipo temprano de edición |
+| Folio GTK4 | Prototipo funcional de lectura basado en WebKitGTK |
+| Folio COSMIC | En desarrollo activo; lectura, estilos, fuentes, anotaciones y TTS |
+| Scriptorium CLI | Funcional: importación, catálogo SQLite/FTS5, organización y servidor OPDS |
+| Scriptorium GTK4 | Prototipo de cliente de biblioteca |
+| Scriptorium COSMIC | Primer corte funcional; catálogo, búsqueda, importación y edición básica de metadatos |
+| Pipeline PDF | Experimental; OCR opcional todavía en integración |
+| Visore | Componente auxiliar experimental |
 
-**Scriptorium** es el entorno de escritura y edición. Una herramienta pensada para autores y editores que facilita la redacción, estructuración y maquetación de nuevos documentos o libros antes de ser exportados.
+No hay todavía una API estable, paquetes de distribución ni una release para
+usuarios finales. Los formatos internos y las interfaces pueden cambiar.
 
-<br clear="left"/>
+## Compilar
 
----
+### Requisitos
 
-## 🚀 Estado del Proyecto
+- Rust estable con Cargo (varios crates usan edition 2024).
+- `pkg-config` y herramientas de compilación C.
+- Bibliotecas de desarrollo de GTK4, Libadwaita, WebKitGTK, GtkSourceView,
+  Cairo y SQLite para las variantes que las utilizan.
+- En los clientes COSMIC, Wayland y las dependencias nativas de `libcosmic`.
 
-Este proyecto se encuentra en **desarrollo activo**. Estamos trabajando simultáneamente en mejorar la arquitectura, añadir nuevas funcionalidades y pulir las interfaces de **Rúbrica**, **Folio** y **Scriptorium**. 
+Los nombres de los paquetes cambian según la distribución. En Pop!_OS/Ubuntu
+se pueden localizar las dependencias que falten a partir del nombre que
+`pkg-config` muestra durante la compilación (por ejemplo, `cairo.pc`).
 
-Las contribuciones, reportes de errores y sugerencias son siempre bienvenidos.
+### Workspace principal
+
+```bash
+git clone https://github.com/pclbusto/Guten.git
+cd Guten
+cargo build --workspace
+```
+
+Ejemplos para ejecutar componentes concretos:
+
+```bash
+cargo run -p folio
+cargo run -p folio-cosmic
+cargo run -p scriptorium --bin rubrica
+cargo run -p scriptorium-gtk
+```
+
+Rúbrica COSMIC y Scriptorium COSMIC mantienen workspaces propios por el
+momento, por lo que se ejecutan desde sus directorios:
+
+```bash
+cargo run --manifest-path Rubrica-cosmic/Cargo.toml
+cargo run --manifest-path Scriptorium/scriptorium-iced/Cargo.toml
+```
+
+Para comprobar el workspace principal:
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets
+```
+
+## Capturas
+
+Todavía no hay capturas verificadas de las aplicaciones en el repositorio. Se
+añadirán cuando las interfaces principales tengan un flujo reproducible. Los
+logos de `assets/` son identidad visual y no representan el estado de la UI.
+
+## Roadmap
+
+- [ ] Estabilizar el modelo EPUB compartido y cubrirlo con pruebas de regresión.
+- [ ] Unificar nombres, rutas de datos y configuración entre GTK4 y COSMIC.
+- [ ] Completar los flujos principales de Folio, Rúbrica y Scriptorium.
+- [ ] Añadir capturas reproducibles y documentación de uso por aplicación.
+- [ ] Automatizar compilación, pruebas y lint en CI.
+- [ ] Definir paquetes para Pop!_OS/Ubuntu y otros escritorios Linux.
+- [ ] Publicar una primera versión pre-release con changelog y binarios.
+
+## Contribuir
+
+Antes de proponer cambios, abrí un issue para acordar alcance y componente. Un
+pull request debería indicar qué aplicación modifica y qué comandos se usaron
+para validarlo.
+
+## Licencia
+
+Guten se distribuye bajo la [Licencia MIT](LICENSE). Se permite usar, copiar,
+modificar y redistribuir el software, incluso con fines comerciales, siempre
+que se conserve el aviso de copyright y el texto de la licencia.
