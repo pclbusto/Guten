@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Rúbrica
+Comment=Editor de EPUB con libcosmic
+Type=Application
+Exec=rubrica-cosmic %F
+Icon=text-editor
+Categories=Office;Publishing;
+MimeType=application/epub+zip;
+Terminal=false

@@ -5,6 +5,8 @@ members = [
     "Rubrica-gtk",
     "Scriptorium",
     "Scriptorium/scriptorium-gtk",
-    "Scriptorium/scriptorium-pdf-pipeline"
+    "Scriptorium/scriptorium-pdf-pipeline",
+    "Folio-cosmic",
+    "visore"
 ]
 resolver = "2"

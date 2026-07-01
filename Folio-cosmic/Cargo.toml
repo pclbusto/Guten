@@ -1,0 +1,38 @@
+[package]
+name = "folio-cosmic"
+version = "0.1.0"
+edition = "2024"
+description = "Lector de EPUB con libcosmic"
+
+[lib]
+name = "folio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "folio-cosmic"
+path = "src/main.rs"
+
+[dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "417923fbafc0f38a63846b307036e4f20fc4960d", features = ["tokio", "wgpu", "xdg-portal"] }
+gutencore = { package = "rubrica", path = "../Rubrica" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+anyhow = "1.0"
+sha2 = "0.10"
+zip = "0.6"
+tokio = { version = "1.37", features = ["full"] }
+rfd = "0.15"
+visore = { path = "../visore" }
+ttf-parser = "0.21"
+cosmic-text = "0.19"
+lazy_static = "1.5"
+[[example]]
+name = "test_open"
+path = "examples/test_open.rs"
+[[example]]
+name = "debug_parse"
+path = "examples/debug_parse.rs"
+[[example]]
+name = "debug_fonts"
+path = "examples/debug_fonts.rs"

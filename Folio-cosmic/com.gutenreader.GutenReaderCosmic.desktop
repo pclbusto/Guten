@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Folio
+GenericName=Lector de libros electrónicos
+Comment=Lee libros EPUB con una interfaz integrada en COSMIC
+Exec=folio-cosmic %f
+Icon=com.gutenreader.GutenReaderCosmic
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.gutenreader.GutenReaderCosmic
+Categories=Office;Viewer;
+MimeType=application/epub+zip;
+Keywords=EPUB;libros;lector;ebook;
