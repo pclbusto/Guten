@@ -13,7 +13,7 @@ digital. Los nombres y responsabilidades son:
 | Aplicación | Función | Implementaciones actuales |
 |---|---|---|
 | **Folio** | Lector de EPUB | GTK4/WebKit (`Folio`) y COSMIC (`Folio-cosmic`) |
-| **Rúbrica** | Motor y editor de EPUB | Core Rust (`Rubrica`), GTK4 (`Rubrica-gtk`) y COSMIC (`Rubrica-cosmic`) |
+| **Rúbrica** | Motor y editor de EPUB | GutenCore / Rúbrica core (`Rubrica`), GTK4 (`Rubrica-gtk`) y COSMIC (`Rubrica-cosmic`) |
 | **Scriptorium** | Gestor de biblioteca | CLI/servidor (`Scriptorium`), GTK4 y COSMIC |
 
 `visore` es un componente auxiliar para visualizar y recortar imágenes desde
@@ -23,7 +23,7 @@ las interfaces COSMIC.
 
 ```text
 Guten
-├── Rubrica/                         Core EPUB compartido (gutencore)
+├── Rubrica/                         GutenCore / Rúbrica core (crate: rubrica)
 ├── Rubrica-gtk/                     Editor GTK4 + Libadwaita
 ├── Rubrica-cosmic/                  Editor COSMIC
 ├── Folio/                           Lector GTK4 + WebKitGTK
@@ -37,7 +37,9 @@ Guten
 
 Las capas se relacionan así:
 
-1. **Rúbrica** abre, valida, modifica y exporta EPUB.
+1. **GutenCore / Rúbrica core** abre, valida, modifica y exporta EPUB. El
+   paquete Cargo se llama `rubrica`, pero los demás componentes lo importan
+   localmente con el alias `gutencore`.
 2. **Scriptorium** usa Rúbrica para importar libros y mantiene el catálogo en
    SQLite con búsqueda FTS5, deduplicación y servicio OPDS.
 3. **Folio** usa Rúbrica para interpretar el EPUB y presentar su contenido.
@@ -48,7 +50,7 @@ Las capas se relacionan así:
 
 | Componente | Estado actual |
 |---|---|
-| Rúbrica core | Funcional: estructura EPUB 3, recursos, navegación, saneamiento XHTML y exportación |
+| GutenCore / Rúbrica core | Funcional: estructura EPUB 3, recursos, navegación, saneamiento XHTML y exportación |
 | Rúbrica GTK4 | Prototipo funcional de edición y previsualización |
 | Rúbrica COSMIC | Prototipo temprano de edición |
 | Folio GTK4 | Prototipo funcional de lectura basado en WebKitGTK |
@@ -93,8 +95,9 @@ cargo run -p scriptorium --bin rubrica
 cargo run -p scriptorium-gtk
 ```
 
-Rúbrica COSMIC y Scriptorium COSMIC mantienen workspaces propios por el
-momento, por lo que se ejecutan desde sus directorios:
+Rúbrica COSMIC (`Rubrica-cosmic`) y Scriptorium COSMIC
+(`Scriptorium/scriptorium-iced`) están **fuera del workspace principal por
+ahora**. Cada uno mantiene un workspace propio y se ejecuta desde su directorio:
 
 ```bash
 cargo run --manifest-path Rubrica-cosmic/Cargo.toml
@@ -110,16 +113,27 @@ cargo clippy --workspace --all-targets
 
 ## Capturas
 
-Todavía no hay capturas verificadas de las aplicaciones en el repositorio. Se
-añadirán cuando las interfaces principales tengan un flujo reproducible. Los
-logos de `assets/` son identidad visual y no representan el estado de la UI.
+Interfaz temprana; el diseño y las funciones todavía pueden cambiar.
+
+### Scriptorium — biblioteca
+
+![Biblioteca de Scriptorium en vista de tarjetas](screenshoots/guten-capturas-001.png)
+
+### Rúbrica — editor y vista previa
+
+![Editor EPUB de Rúbrica con vista previa](screenshoots/guten-capturas-003.png)
+
+### Folio — lectura
+
+![Lector Folio mostrando un capítulo](screenshoots/guten-capturas-009.png)
 
 ## Roadmap
 
 - [ ] Estabilizar el modelo EPUB compartido y cubrirlo con pruebas de regresión.
 - [ ] Unificar nombres, rutas de datos y configuración entre GTK4 y COSMIC.
 - [ ] Completar los flujos principales de Folio, Rúbrica y Scriptorium.
-- [ ] Añadir capturas reproducibles y documentación de uso por aplicación.
+- [x] Añadir primeras capturas de las aplicaciones.
+- [ ] Ampliar la documentación de uso de cada aplicación.
 - [ ] Automatizar compilación, pruebas y lint en CI.
 - [ ] Definir paquetes para Pop!_OS/Ubuntu y otros escritorios Linux.
 - [ ] Publicar una primera versión pre-release con changelog y binarios.
