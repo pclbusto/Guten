@@ -1,0 +1,12 @@
+[package]
+name = "visore"
+version = "0.1.0"
+edition = "2024"
+description = "Image viewer and crop tool built with libcosmic"
+
+[dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "417923fbafc0f38a63846b307036e4f20fc4960d", features = ["tokio", "wgpu", "xdg-portal"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+rfd = "0.15"
+tokio = { version = "1.37", features = ["full"] }
+anyhow = "1.0"

@@ -443,6 +443,105 @@ impl LibraryDb {
         Ok(rows)
     }
 
+    /// Lista una subsección de todos los libros (paginada).
+    pub async fn list_books_subset(&self, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<BookListItem>> {
+        let mut query = String::from(r#"
+            SELECT
+                b.id,
+                b.title,
+                a.name as author_name,
+                s.name as series_name,
+                b.current_path,
+                b.is_normalized,
+                b.date_added,
+                b.file_hash,
+                b.cover_href,
+                b.cover_media_type
+            FROM books b
+            JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
+            ORDER BY b.date_added DESC
+        "#);
+
+        if limit.is_some() {
+            query.push_str(" LIMIT ?");
+        }
+        if offset.is_some() {
+            query.push_str(" OFFSET ?");
+        }
+
+        let mut q = sqlx::query_as::<_, BookListItem>(&query);
+        if let Some(limit) = limit {
+            q = q.bind(limit);
+        }
+        if let Some(offset) = offset {
+            q = q.bind(offset);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    /// Busca libros en el índice FTS5 con paginación.
+    pub async fn search_fts_subset(&self, query: &str, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<BookListItem>> {
+        let mut sql = String::from(r#"
+            SELECT
+                b.id,
+                b.title,
+                a.name as author_name,
+                s.name as series_name,
+                b.current_path,
+                b.is_normalized,
+                b.date_added,
+                b.file_hash,
+                b.cover_href,
+                b.cover_media_type
+            FROM books b
+            JOIN books_fts f ON b.id = f.rowid
+            JOIN authors a ON b.author_id = a.id
+            LEFT JOIN series s ON b.series_id = s.id
+            WHERE books_fts MATCH ?
+            ORDER BY b.date_added DESC
+        "#);
+
+        if limit.is_some() {
+            sql.push_str(" LIMIT ?");
+        }
+        if offset.is_some() {
+            sql.push_str(" OFFSET ?");
+        }
+
+        let mut q = sqlx::query_as::<_, BookListItem>(&sql).bind(query);
+        if let Some(limit) = limit {
+            q = q.bind(limit);
+        }
+        if let Some(offset) = offset {
+            q = q.bind(offset);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    /// Cuenta el número total de libros.
+    pub async fn count_books(&self) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM books")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+
+    /// Cuenta el número total de libros que coinciden con la búsqueda FTS5.
+    pub async fn count_search_fts(&self, query: &str) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM books b JOIN books_fts f ON b.id = f.rowid WHERE books_fts MATCH ?"
+        )
+        .bind(query)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
     // ─── Alias CRUD ───────────────────────────────────────────────────
 
     /// Obtiene el comando correspondiente a un alias.
@@ -796,7 +895,7 @@ impl LibraryDb {
     }
 }
 
-#[derive(sqlx::FromRow, Debug)]
+#[derive(sqlx::FromRow, Debug, Clone)]
 pub struct BookListItem {
     pub id: i64,
     pub title: String,
