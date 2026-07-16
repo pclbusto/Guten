@@ -3,11 +3,12 @@ name = "rubrica-cosmic"
 version = "0.1.0"
 edition = "2024"
 description = "Editor de EPUB con libcosmic"
+license = "MIT"
 
 [workspace]
 
 [dependencies]
-libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "417923fbafc0f38a63846b307036e4f20fc4960d", features = ["tokio", "wgpu", "xdg-portal"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "417923fbafc0f38a63846b307036e4f20fc4960d", features = ["tokio", "wgpu", "xdg-portal", "about"] }
 gutencore = { package = "rubrica", path = "../Rubrica" }
 folio = { package = "folio-cosmic", path = "../Folio-cosmic" }
 serde = { version = "1.0", features = ["derive"] }
@@ -17,3 +18,5 @@ anyhow = "1.0"
 zip = "0.6"
 tokio = { version = "1.37", features = ["full"] }
 rfd = "0.15"
+open = "5"
+pathdiff = "0.2"

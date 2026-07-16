@@ -1,3 +1,4 @@
+use crate::css::{self, CssRule};
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::font::{Style, Weight};
 use cosmic::iced::{Color, Font};
@@ -14,6 +15,43 @@ pub struct StyledSpan {
     pub size: Option<f32>,
     pub link: Option<String>,
     pub classes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InlineNode {
+    Text(StyledSpan),
+    LineBreak,
+    Image {
+        src: String,
+        alt: String,
+        classes: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InlineBlockKind {
+    Heading(u8),
+    Paragraph,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableCell {
+    pub text: String,
+    pub header: bool,
+    pub classes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableRow {
+    pub cells: Vec<TableCell>,
+    pub classes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    pub spans: Vec<StyledSpan>,
+    pub classes: Vec<String>,
+    pub depth: usize,
 }
 
 #[allow(dead_code)]
@@ -85,6 +123,20 @@ pub enum ContentBlock {
     Image {
         src: String,
         alt: String,
+    },
+    Inline {
+        kind: InlineBlockKind,
+        nodes: Vec<InlineNode>,
+        classes: Vec<String>,
+    },
+    Table {
+        rows: Vec<TableRow>,
+        classes: Vec<String>,
+    },
+    List {
+        ordered: bool,
+        items: Vec<ListItem>,
+        classes: Vec<String>,
     },
     Separator,
 }
@@ -178,7 +230,9 @@ impl StyleMap {
 }
 
 fn decode_entities(text: &str) -> String {
-    text.replace("&amp;", "&")
+    let decoded = decode_numeric_entities(text);
+    decoded
+        .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
@@ -216,6 +270,39 @@ fn decode_entities(text: &str) -> String {
         .replace("&reg;", "\u{00ae}")
         .replace("&trade;", "\u{2122}")
         .replace("&euro;", "\u{20ac}")
+}
+
+fn decode_numeric_entities(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(entity) = rest.strip_prefix("&#")
+            && let Some(end) = entity.find(';')
+        {
+            let value = &entity[..end];
+            let codepoint = value
+                .strip_prefix(['x', 'X'])
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| value.parse::<u32>().ok());
+            if let Some(character) = codepoint.and_then(char::from_u32) {
+                if character == '\u{00a0}' {
+                    decoded.push(' ');
+                } else {
+                    decoded.push(character);
+                }
+                index += 2 + end + 1;
+                continue;
+            }
+        }
+
+        let character = rest.chars().next().expect("non-empty text remainder");
+        decoded.push(character);
+        index += character.len_utf8();
+    }
+
+    decoded
 }
 
 fn parse_img_attributes(tail: &str) -> (String, String) {
@@ -321,9 +408,122 @@ fn parse_class_attr(tail: &str) -> Vec<String> {
     classes
 }
 
+pub fn parse_xhtml_with_css(html: &str) -> (Vec<ContentBlock>, Vec<CssRule>) {
+    let mut rules = extract_embedded_css(html);
+    let (prepared, inline_rules) = inject_inline_style_classes(html);
+    rules.extend(inline_rules);
+    (parse_xhtml(&prepared), rules)
+}
+
+fn extract_embedded_css(html: &str) -> Vec<CssRule> {
+    let lower = html.to_lowercase();
+    let mut rules = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = lower[offset..].find("<style") {
+        let start = offset + start;
+        let Some(open_end) = lower[start..].find('>') else {
+            break;
+        };
+        let content_start = start + open_end + 1;
+        let Some(close) = lower[content_start..].find("</style>") else {
+            break;
+        };
+        let content_end = content_start + close;
+        rules.extend(css::parse_css(&html[content_start..content_end]).0);
+        offset = content_end + "</style>".len();
+    }
+    rules
+}
+
+fn inject_inline_style_classes(html: &str) -> (String, Vec<CssRule>) {
+    let mut output = String::with_capacity(html.len());
+    let mut rules = Vec::new();
+    let mut offset = 0;
+    let mut index = 0;
+    while let Some(relative_start) = html[offset..].find('<') {
+        let start = offset + relative_start;
+        output.push_str(&html[offset..start]);
+        let Some(relative_end) = html[start..].find('>') else {
+            output.push_str(&html[start..]);
+            return (output, rules);
+        };
+        let end = start + relative_end + 1;
+        let tag = &html[start..end];
+        if !tag.starts_with("</")
+            && !tag.starts_with("<!--")
+            && !tag.starts_with("<?")
+            && let Some(style) = attribute_value(tag, "style")
+        {
+            let class = format!("__folio_inline_{index}");
+            index += 1;
+            output.push_str(&inject_class(tag, &class));
+            rules.push(CssRule {
+                selector: format!(".{class}"),
+                properties: css::parse_declarations(&style),
+            });
+        } else {
+            output.push_str(tag);
+        }
+        offset = end;
+    }
+    output.push_str(&html[offset..]);
+    (output, rules)
+}
+
+fn attribute_value(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_lowercase();
+    let mut search = 0;
+    while let Some(found) = lower[search..].find(name) {
+        let start = search + found;
+        let before_ok =
+            start == 0 || !lower.as_bytes()[start.saturating_sub(1)].is_ascii_alphanumeric();
+        let mut cursor = start + name.len();
+        while cursor < tag.len() && tag.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if before_ok && tag.as_bytes().get(cursor) == Some(&b'=') {
+            cursor += 1;
+            while cursor < tag.len() && tag.as_bytes()[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let quote = *tag.as_bytes().get(cursor)?;
+            if quote == b'\'' || quote == b'"' {
+                cursor += 1;
+                let end = tag[cursor..].find(quote as char)? + cursor;
+                return Some(tag[cursor..end].to_string());
+            }
+        }
+        search = start + name.len();
+    }
+    None
+}
+
+fn inject_class(tag: &str, class: &str) -> String {
+    if let Some(existing) = attribute_value(tag, "class") {
+        let needle_double = format!("class=\"{existing}\"");
+        let needle_single = format!("class='{existing}'");
+        if tag.contains(&needle_double) {
+            return tag.replacen(&needle_double, &format!("class=\"{existing} {class}\""), 1);
+        }
+        if tag.contains(&needle_single) {
+            return tag.replacen(&needle_single, &format!("class='{existing} {class}'"), 1);
+        }
+    }
+    let insertion = tag
+        .rfind("/>")
+        .or_else(|| tag.rfind('>'))
+        .unwrap_or(tag.len());
+    format!(
+        "{} class=\"{}\"{}",
+        &tag[..insertion],
+        class,
+        &tag[insertion..]
+    )
+}
+
 pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
-    let mut current_spans: Vec<StyledSpan> = Vec::new();
+    let mut current_spans: Vec<InlineNode> = Vec::new();
     let mut text_buf = String::new();
     let mut bold_depth: u32 = 0;
     let mut italic_depth: u32 = 0;
@@ -333,11 +533,21 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
     let mut current_span_classes: Vec<String> = Vec::new();
     let mut in_script = false;
     let mut in_style = false;
+    let mut in_table = false;
+    let mut table_rows: Vec<TableRow> = Vec::new();
+    let mut current_row: Vec<TableCell> = Vec::new();
+    let mut current_cell_header = false;
+    let mut table_classes = Vec::new();
+    let mut row_classes = Vec::new();
+    let mut cell_classes = Vec::new();
+    let mut in_list: Option<bool> = None;
+    let mut list_items: Vec<ListItem> = Vec::new();
+    let mut list_classes = Vec::new();
+    let mut list_depth = 0usize;
+    let mut item_classes = Vec::new();
+    let mut list_class_stack: Vec<Vec<String>> = Vec::new();
 
     let html = html
-        .replace("<br/>", "\n")
-        .replace("<br />", "\n")
-        .replace("<br>", "\n")
         .replace("<hr/>", "\n---\n")
         .replace("<hr />", "\n---\n")
         .replace("<hr>", "\n---\n");
@@ -399,18 +609,45 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
                     italic_depth,
                     &current_span_classes,
                 );
-                push_block(
-                    &mut blocks,
-                    &mut current_spans,
-                    in_heading,
-                    in_paragraph,
-                    block_classes.clone(),
-                );
-
                 if !src.is_empty() {
-                    blocks.push(ContentBlock::Image { src, alt });
+                    if in_heading.is_some() || in_paragraph {
+                        current_spans.push(InlineNode::Image {
+                            src,
+                            alt,
+                            classes: tag_classes,
+                        });
+                    } else {
+                        push_block(
+                            &mut blocks,
+                            &mut current_spans,
+                            in_heading,
+                            in_paragraph,
+                            block_classes.clone(),
+                        );
+                        blocks.push(ContentBlock::Image { src, alt });
+                    }
                 }
 
+                while pos < len && bytes[pos] != b'>' {
+                    pos += 1;
+                }
+                if pos < len {
+                    pos += 1;
+                }
+                continue;
+            }
+
+            if !is_closing && tag_lower == "br" {
+                flush_text(
+                    &mut text_buf,
+                    &mut current_spans,
+                    bold_depth,
+                    italic_depth,
+                    &current_span_classes,
+                );
+                if in_heading.is_some() || in_paragraph {
+                    current_spans.push(InlineNode::LineBreak);
+                }
                 while pos < len && bytes[pos] != b'>' {
                     pos += 1;
                 }
@@ -429,6 +666,82 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
 
             if is_closing {
                 match tag_lower.as_str() {
+                    "td" | "th" if in_table => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        let text = inline_nodes_text(&current_spans);
+                        current_spans.clear();
+                        current_row.push(TableCell {
+                            text: text.trim().to_string(),
+                            header: current_cell_header,
+                            classes: std::mem::take(&mut cell_classes),
+                        });
+                        in_paragraph = false;
+                    }
+                    "tr" if in_table => {
+                        text_buf.clear();
+                        if !current_row.is_empty() {
+                            table_rows.push(TableRow {
+                                cells: std::mem::take(&mut current_row),
+                                classes: std::mem::take(&mut row_classes),
+                            });
+                        }
+                    }
+                    "table" if in_table => {
+                        text_buf.clear();
+                        if !current_row.is_empty() {
+                            table_rows.push(TableRow {
+                                cells: std::mem::take(&mut current_row),
+                                classes: std::mem::take(&mut row_classes),
+                            });
+                        }
+                        if !table_rows.is_empty() {
+                            blocks.push(ContentBlock::Table {
+                                rows: std::mem::take(&mut table_rows),
+                                classes: std::mem::take(&mut table_classes),
+                            });
+                        }
+                        in_table = false;
+                    }
+                    "li" if in_list.is_some() => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        let spans = take_text_spans(&mut current_spans);
+                        if !spans.is_empty() {
+                            list_items.push(ListItem {
+                                spans,
+                                classes: std::mem::take(&mut item_classes),
+                                depth: list_depth,
+                            });
+                        }
+                        in_paragraph = false;
+                    }
+                    "ul" | "ol" if in_list.is_some() && list_depth > 0 => {
+                        text_buf.clear();
+                        list_depth -= 1;
+                        list_class_stack.pop();
+                    }
+                    "ul" | "ol" if in_list.is_some() => {
+                        text_buf.clear();
+                        let ordered = in_list.take().unwrap_or(false);
+                        if !list_items.is_empty() {
+                            blocks.push(ContentBlock::List {
+                                ordered,
+                                items: std::mem::take(&mut list_items),
+                                classes: std::mem::take(&mut list_classes),
+                            });
+                        }
+                    }
                     "script" => in_script = false,
                     "style" => in_style = false,
                     "title" => in_style = false,
@@ -451,6 +764,16 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
                             &current_span_classes,
                         );
                         italic_depth = italic_depth.saturating_sub(1);
+                    }
+                    "small" => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        current_span_classes.retain(|class| class != "__folio-small");
                     }
                     "span" => {
                         flush_text(
@@ -485,6 +808,95 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
                 }
             } else {
                 match tag_lower.as_str() {
+                    "table" => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        push_block(
+                            &mut blocks,
+                            &mut current_spans,
+                            in_heading,
+                            in_paragraph,
+                            std::mem::take(&mut block_classes),
+                        );
+                        in_heading = None;
+                        in_paragraph = false;
+                        in_table = true;
+                        table_classes = tag_classes;
+                        table_rows.clear();
+                        current_row.clear();
+                    }
+                    "thead" | "tbody" if in_table => text_buf.clear(),
+                    "tr" if in_table => {
+                        text_buf.clear();
+                        current_row.clear();
+                        row_classes = tag_classes;
+                        if table_rows.len() % 2 == 1 {
+                            row_classes.push("__folio-even".to_string());
+                        }
+                    }
+                    "td" | "th" if in_table => {
+                        text_buf.clear();
+                        current_spans.clear();
+                        current_cell_header = tag_lower == "th";
+                        cell_classes = tag_classes;
+                        in_paragraph = true;
+                    }
+                    "ul" | "ol" if in_list.is_some() => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        let spans = take_text_spans(&mut current_spans);
+                        if !spans.is_empty() {
+                            list_items.push(ListItem {
+                                spans,
+                                classes: std::mem::take(&mut item_classes),
+                                depth: list_depth,
+                            });
+                        }
+                        list_depth += 1;
+                        list_class_stack.push(tag_classes);
+                    }
+                    "ul" | "ol" => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        push_block(
+                            &mut blocks,
+                            &mut current_spans,
+                            in_heading,
+                            in_paragraph,
+                            std::mem::take(&mut block_classes),
+                        );
+                        in_heading = None;
+                        in_paragraph = false;
+                        in_list = Some(tag_lower == "ol");
+                        list_classes = tag_classes;
+                        list_class_stack = vec![list_classes.clone()];
+                        list_depth = 0;
+                        list_items.clear();
+                    }
+                    "li" if in_list.is_some() => {
+                        text_buf.clear();
+                        current_spans.clear();
+                        item_classes = tag_classes;
+                        if let Some(active_classes) = list_class_stack.last() {
+                            item_classes.extend(active_classes.iter().cloned());
+                        }
+                        in_paragraph = true;
+                    }
                     "script" => in_script = true,
                     "style" => in_style = true,
                     "title" => in_style = true,
@@ -507,6 +919,21 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
                             &current_span_classes,
                         );
                         italic_depth += 1;
+                    }
+                    "small" => {
+                        flush_text(
+                            &mut text_buf,
+                            &mut current_spans,
+                            bold_depth,
+                            italic_depth,
+                            &current_span_classes,
+                        );
+                        if !current_span_classes
+                            .iter()
+                            .any(|class| class == "__folio-small")
+                        {
+                            current_span_classes.push("__folio-small".to_string());
+                        }
                     }
                     "span" => {
                         flush_text(
@@ -699,7 +1126,7 @@ pub fn parse_xhtml(html: &str) -> Vec<ContentBlock> {
 
 fn flush_text(
     text_buf: &mut String,
-    spans: &mut Vec<StyledSpan>,
+    spans: &mut Vec<InlineNode>,
     bold_depth: u32,
     italic_depth: u32,
     span_classes: &[String],
@@ -710,7 +1137,7 @@ fn flush_text(
         return;
     }
 
-    spans.push(StyledSpan {
+    spans.push(InlineNode::Text(StyledSpan {
         text: collapsed,
         bold: bold_depth > 0,
         italic: italic_depth > 0,
@@ -720,7 +1147,7 @@ fn flush_text(
         size: None,
         link: None,
         classes: span_classes.to_vec(),
-    });
+    }));
 }
 
 fn collapse_html_whitespace(text: &str) -> String {
@@ -746,9 +1173,30 @@ fn collapse_html_whitespace(text: &str) -> String {
     collapsed
 }
 
+fn inline_nodes_text(nodes: &[InlineNode]) -> String {
+    nodes
+        .iter()
+        .map(|node| match node {
+            InlineNode::Text(span) => span.text.as_str(),
+            InlineNode::LineBreak => "\n",
+            InlineNode::Image { alt, .. } => alt.as_str(),
+        })
+        .collect()
+}
+
+fn take_text_spans(nodes: &mut Vec<InlineNode>) -> Vec<StyledSpan> {
+    std::mem::take(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            InlineNode::Text(span) => Some(span),
+            InlineNode::LineBreak | InlineNode::Image { .. } => None,
+        })
+        .collect()
+}
+
 fn push_block(
     blocks: &mut Vec<ContentBlock>,
-    spans: &mut Vec<StyledSpan>,
+    spans: &mut Vec<InlineNode>,
     heading: Option<u8>,
     _in_paragraph: bool,
     classes: Vec<String>,
@@ -757,18 +1205,37 @@ fn push_block(
         return;
     }
 
-    if let Some(first) = spans.first_mut() {
+    if let Some(InlineNode::Text(first)) = spans.first_mut() {
         first.text = first.text.trim_start().to_string();
     }
-    if let Some(last) = spans.last_mut() {
+    if let Some(InlineNode::Text(last)) = spans.last_mut() {
         last.text = last.text.trim_end().to_string();
     }
-    spans.retain(|span| !span.text.is_empty());
+    spans.retain(|node| !matches!(node, InlineNode::Text(span) if span.text.is_empty()));
     if spans.is_empty() {
         return;
     }
 
     let taken = std::mem::take(spans);
+    if taken
+        .iter()
+        .any(|node| !matches!(node, InlineNode::Text(_)))
+    {
+        blocks.push(ContentBlock::Inline {
+            kind: heading.map_or(InlineBlockKind::Paragraph, InlineBlockKind::Heading),
+            nodes: taken,
+            classes,
+        });
+        return;
+    }
+    let taken: Vec<StyledSpan> = taken
+        .into_iter()
+        .filter_map(|node| match node {
+            InlineNode::Text(span) => Some(span),
+            InlineNode::LineBreak => None,
+            InlineNode::Image { .. } => None,
+        })
+        .collect();
     if let Some(level) = heading {
         blocks.push(ContentBlock::Heading {
             level,
@@ -818,34 +1285,129 @@ mod tests {
     }
 
     #[test]
-    fn image_inside_heading_preserves_classes_on_both_text_blocks() {
-        let html = r#"<h2 class="litos">CAPÍTULO 1<img src="title.jpg" />DUQUE TIAGO</h2>"#;
+    fn image_inside_heading_is_preserved_in_inline_order() {
+        let html = r#"<h2 class="litos">CAPÍTULO 1<img class="fighter" src="title.jpg" />DUQUE TIAGO</h2>"#;
         let blocks = parse_xhtml(html);
 
-        assert_eq!(blocks.len(), 3);
-        for index in [0, 2] {
-            let ContentBlock::Heading {
-                level,
-                spans,
-                classes,
-            } = &blocks[index]
-            else {
-                panic!("expected heading at index {index}");
-            };
-            assert_eq!(*level, 2);
-            assert_eq!(classes, &["litos"]);
-            assert_eq!(spans.len(), 1);
-        }
-        let heading_text = |block: &ContentBlock| match block {
-            ContentBlock::Heading { spans, .. } => spans
-                .iter()
-                .map(|span| span.text.as_str())
-                .collect::<String>(),
-            _ => panic!("expected heading"),
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Inline {
+            kind: InlineBlockKind::Heading(2),
+            nodes,
+            classes,
+        } = &blocks[0]
+        else {
+            panic!("expected mixed inline heading");
         };
-        assert_eq!(heading_text(&blocks[0]), "CAPÍTULO 1");
-        assert!(matches!(&blocks[1], ContentBlock::Image { src, .. } if src == "title.jpg"));
-        assert_eq!(heading_text(&blocks[2]), "DUQUE TIAGO");
+        assert_eq!(classes, &["litos"]);
+        assert!(matches!(&nodes[0], InlineNode::Text(span) if span.text == "CAPÍTULO 1"));
+        assert!(
+            matches!(&nodes[1], InlineNode::Image { src, classes, .. } if src == "title.jpg" && classes == &["fighter"])
+        );
+        assert!(matches!(&nodes[2], InlineNode::Text(span) if span.text == "DUQUE TIAGO"));
+    }
+
+    #[test]
+    fn heading_preserves_small_text_and_explicit_line_break() {
+        let html = r#"<h1 title="Lo que ha pasado antes"><small>LO QUE HA PASADO ANTES</small> <br/><span class="stt"><small>&#160;</small></span></h1>"#;
+        let blocks = parse_xhtml(html);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Inline {
+            kind: InlineBlockKind::Heading(1),
+            nodes,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("expected inline heading");
+        };
+        assert!(matches!(&nodes[0], InlineNode::Text(span)
+            if span.text == "LO QUE HA PASADO ANTES"
+                && span.classes.iter().any(|class| class == "__folio-small")));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node, InlineNode::LineBreak))
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node, InlineNode::Text(span)
+            if span.classes.iter().any(|class| class == "stt")
+                && span.classes.iter().any(|class| class == "__folio-small")
+                && !span.text.contains("160")))
+        );
+    }
+
+    #[test]
+    fn decodes_decimal_and_hexadecimal_numeric_entities() {
+        assert_eq!(decode_entities("A&#160;B"), "A B");
+        assert_eq!(decode_entities("&#x41;&#X42;"), "AB");
+        assert_eq!(decode_entities("&#225;"), "á");
+    }
+
+    #[test]
+    fn parses_tables_and_bulleted_lists_as_structured_blocks() {
+        let html = r#"
+            <h1 class="center">Capítulo 2</h1>
+            <table><thead><tr>
+                <th>Columna 1</th><th>Columna 2</th><th>Columna 3</th><th>Columna 4</th>
+            </tr></thead><tbody>
+                <tr><td>1-1</td><td>1-2</td><td>1-3</td><td>1-4</td></tr>
+                <tr><td>2-1</td><td>2-2</td><td>2-3</td><td>2-4</td></tr>
+                <tr><td>3-1</td><td>3-2</td><td>3-3</td><td>3-4</td></tr>
+            </tbody></table>
+            <ul><li>Uno</li><li>Dos</li><li>Tres</li><li>Cuatro</li><li>Cinco</li></ul>
+        "#;
+        let blocks = parse_xhtml(html);
+
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Table { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .expect("table block");
+        assert_eq!(table.len(), 4);
+        assert!(table.iter().all(|row| row.cells.len() == 4));
+        assert!(table[0].cells.iter().all(|cell| cell.header));
+
+        let items = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::List { ordered, items, .. } if !ordered => Some(items),
+                _ => None,
+            })
+            .expect("unordered list block");
+        assert_eq!(items.len(), 5);
+    }
+
+    #[test]
+    fn extracts_embedded_and_inline_css_without_rendering_style_text() {
+        let html = r#"
+            <html><head><style>.rojo { color: #e74c3c; }</style></head>
+            <body><h1 class="rojo" style="padding: 10px;">Título</h1></body></html>
+        "#;
+        let (blocks, rules) = parse_xhtml_with_css(html);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Heading { spans, classes, .. } = &blocks[0] else {
+            panic!("expected heading");
+        };
+        assert_eq!(spans[0].text, "Título");
+        assert!(classes.iter().any(|class| class == "rojo"));
+        assert!(
+            classes
+                .iter()
+                .any(|class| class.starts_with("__folio_inline_"))
+        );
+        assert!(rules.iter().any(|rule| rule.selector == ".rojo"));
+        assert!(rules.iter().any(|rule| {
+            rule.selector.starts_with(".__folio_inline_")
+                && rule
+                    .properties
+                    .get("padding")
+                    .is_some_and(|value| value == "10px")
+        }));
     }
 
     #[test]

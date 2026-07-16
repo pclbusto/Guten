@@ -114,18 +114,36 @@ impl DocumentModel {
     /// Parsea el capítulo actual y deja sus recursos relativos resueltos contra
     /// la ubicación real del XHTML. La UI recibe rutas listas para consumir.
     pub fn current_chapter_blocks(&mut self) -> Result<Vec<ContentBlock>> {
+        self.current_chapter_content().map(|(blocks, _)| blocks)
+    }
+
+    pub fn current_chapter_content(
+        &mut self,
+    ) -> Result<(Vec<ContentBlock>, Vec<folio::css::CssRule>)> {
         let html = self.current_chapter_html()?;
-        let mut blocks = content::parse_xhtml(&html);
+        let (mut blocks, rules) = content::parse_xhtml_with_css(&html);
 
         for block in &mut blocks {
-            if let ContentBlock::Image { src, .. } = block {
-                if let Some(path) = self.resolve_chapter_resource(src) {
-                    *src = path.to_string_lossy().into_owned();
+            match block {
+                ContentBlock::Image { src, .. } => {
+                    if let Some(path) = self.resolve_chapter_resource(src) {
+                        *src = path.to_string_lossy().into_owned();
+                    }
                 }
+                ContentBlock::Inline { nodes, .. } => {
+                    for node in nodes {
+                        if let content::InlineNode::Image { src, .. } = node
+                            && let Some(path) = self.resolve_chapter_resource(src)
+                        {
+                            *src = path.to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
-        Ok(blocks)
+        Ok((blocks, rules))
     }
 
     /// Resuelve un recurso referido por el capítulo actual sin permitir que

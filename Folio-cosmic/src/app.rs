@@ -1,8 +1,10 @@
+use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
 use cosmic::iced::event::{self, Event, Status as EventStatus};
 use cosmic::iced::keyboard::{self, Key};
 use cosmic::iced::{Color, Length, Subscription};
-use cosmic::widget::{self, button};
+use cosmic::widget::about::About;
+use cosmic::widget::{self, button, icon, nav_bar, text, tooltip};
 use cosmic::{Application, ApplicationExt, Element};
 
 use crate::annotations::AnnotationStore;
@@ -22,51 +24,43 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SidebarTab {
-    Toc,
-    Search,
-}
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     OpenFile,
+    OpenRecent(usize),
     FileSelected(Option<PathBuf>),
     CloseBook,
 
     NextChapter,
     PrevChapter,
 
-    ToggleSidebar,
     OpenSearchSidebar,
-    SelectSidebarTab(SidebarTab),
-    SelectTocEntry(usize),
 
     SearchQueryChanged(String),
     ExecuteSearch,
     SelectSearchResult(usize),
 
     ToggleReadingPanel,
-    SetProfile(String),
-    FontIncrease,
-    FontDecrease,
-    FontReset,
-    SelectFont(String),
-    LineHeightIncrease,
-    LineHeightDecrease,
+    SelectProfile(usize),
+    SelectFont(usize),
+    FontSizeChanged(f64),
     MarginIncrease,
     MarginDecrease,
 
-    ToggleMenu,
+    ToggleAbout,
+    OpenUrl(String),
+
     ToggleTts,
 
     ImageClicked(String),
     CloseImage,
 
     SetReaderScroll(f32),
+    ReaderWheel { delta: f32, smooth: bool },
+    ScrollAnimationTick(Instant),
     PageDown,
     PageUp,
     KeyPressed(keyboard::Event),
@@ -92,9 +86,10 @@ pub(crate) struct App {
     annotations: Option<AnnotationStore>,
     toc_entries: Vec<TocEntry>,
     current_blocks: Vec<ContentBlock>,
+    book_title: String,
     chapter_title: String,
     sidebar_open: bool,
-    sidebar_tab: SidebarTab,
+    nav_model: nav_bar::Model,
     search_query: String,
     search_results: Vec<gutencore::SearchResult>,
     status: Option<String>,
@@ -106,11 +101,15 @@ pub(crate) struct App {
     style_map: StyleMap,
     epub_fonts: Vec<EpubFont>,
     css_rules: Vec<CssRule>,
+    book_css_rules: Vec<CssRule>,
     font_faces: Vec<(FontFaceRule, std::path::PathBuf)>,
     font_name_map: FontNameMap,
     reading_panel_open: bool,
-    menu_open: bool,
+    about: About,
+    show_about: bool,
     reader_scroll_y: f32,
+    scroll_velocity: f32,
+    last_scroll_tick: Option<Instant>,
     reader_metrics: Rc<RefCell<ReaderMetrics>>,
     image_metadata_cache: Rc<RefCell<ImageMetadataCache>>,
     reader_layout_cache: Rc<RefCell<ReaderLayoutCache>>,
@@ -145,12 +144,41 @@ impl Application for App {
         &mut self.core
     }
 
-    fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![
-            button::standard("\u{2630}")
-                .on_press(Message::ToggleSidebar)
-                .into(),
-        ]
+    fn nav_model(&self) -> Option<&nav_bar::Model> {
+        (self.document.is_some() && !self.sidebar_open && !self.reading_panel_open)
+            .then_some(&self.nav_model)
+    }
+
+    fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Self::Message> {
+        let Some(idx) = self.nav_model.data::<usize>(id).copied() else {
+            return Task::none();
+        };
+        let Some(href) = self.toc_entries.get(idx).map(|entry| entry.href.clone()) else {
+            return Task::none();
+        };
+
+        self.nav_model.activate(id);
+        if let Some(ref mut doc) = self.document
+            && doc.goto_toc_href(&href)
+        {
+            self.spine_progress = (doc.spine_index + 1, doc.spine_len());
+            self.sidebar_open = false;
+            self.reading_panel_open = false;
+            self.showing_image = false;
+            self.reset_reader_scroll();
+            self.load_chapter_sync();
+        }
+        Task::none()
+    }
+
+    fn context_drawer(&self) -> Option<ContextDrawer<'_, Self::Message>> {
+        self.show_about.then(|| {
+            context_drawer::about(
+                &self.about,
+                |url| Message::OpenUrl(url.to_owned()),
+                Message::ToggleAbout,
+            )
+        })
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
@@ -171,18 +199,40 @@ impl Application for App {
                     .on_press(Message::ToggleReadingPanel)
                     .into(),
             );
-            items.push(
-                button::standard("\u{22ef}")
-                    .on_press(Message::ToggleMenu)
-                    .into(),
-            );
         }
+        items.push(
+            tooltip(
+                button::icon(icon::from_name("help-about-symbolic"))
+                    .on_press(Message::ToggleAbout)
+                    .padding(8),
+                text::body("Acerca de"),
+                tooltip::Position::Bottom,
+            )
+            .into(),
+        );
         items
     }
 
     fn init(core: Core, epub_path: Self::Flags) -> (Self, Task<Self::Message>) {
         let settings = ReaderSettings::load();
         let tts_engine = TtsEngine::new();
+        let about = About::default()
+            .name("Folio")
+            .icon(widget::icon::from_name(Self::APP_ID))
+            .version(env!("CARGO_PKG_VERSION"))
+            .author("Guten")
+            .comments("Lector de libros EPUB para COSMIC, parte del proyecto Guten.")
+            .copyright("© 2026 Proyecto Guten")
+            .license("MIT")
+            .license_url("https://github.com/pclbusto/Guten/blob/main/LICENSE")
+            .links([
+                ("Proyecto Guten", "https://github.com/pclbusto/Guten"),
+                ("Documentación", "https://github.com/pclbusto/Guten#readme"),
+                (
+                    "Reportar un problema",
+                    "https://github.com/pclbusto/Guten/issues",
+                ),
+            ]);
 
         let mut app = Self {
             core,
@@ -191,9 +241,10 @@ impl Application for App {
             annotations: None,
             toc_entries: Vec::new(),
             current_blocks: Vec::new(),
+            book_title: String::new(),
             chapter_title: String::new(),
             sidebar_open: false,
-            sidebar_tab: SidebarTab::Toc,
+            nav_model: nav_bar::Model::default(),
             search_query: String::new(),
             search_results: Vec::new(),
             status: None,
@@ -205,11 +256,15 @@ impl Application for App {
             style_map: StyleMap::default(),
             epub_fonts: Vec::new(),
             css_rules: Vec::new(),
+            book_css_rules: Vec::new(),
             font_faces: Vec::new(),
             font_name_map: FontNameMap::default(),
             reading_panel_open: false,
-            menu_open: false,
+            about,
+            show_about: false,
             reader_scroll_y: 0.0,
+            scroll_velocity: 0.0,
+            last_scroll_tick: None,
             reader_metrics: Rc::new(RefCell::new(ReaderMetrics::default())),
             image_metadata_cache: Rc::new(RefCell::new(ImageMetadataCache::default())),
             reader_layout_cache: Rc::new(RefCell::new(ReaderLayoutCache::default())),
@@ -237,10 +292,15 @@ impl Application for App {
                 );
             }
 
+            Message::OpenRecent(index) => {
+                if let Some(path) = self.settings.recent_book(index) {
+                    return self.update(Message::FileSelected(Some(path)));
+                }
+            }
+
             Message::FileSelected(Some(path)) => {
                 self.sidebar_open = false;
                 self.reading_panel_open = false;
-                self.menu_open = false;
                 self.showing_image = false;
                 self.status = Some("Abriendo...".into());
 
@@ -291,11 +351,34 @@ impl Application for App {
                     let (rules, faces) = self.load_epub_css(doc);
                     self.font_name_map = fonts::build_font_name_map(&faces, &self.epub_fonts);
                     self.css_rules = rules;
+                    self.book_css_rules = self.css_rules.clone();
                     self.font_faces = faces;
                 }
                 self.document = doc;
+                self.book_title = self
+                    .document
+                    .as_ref()
+                    .and_then(|doc| doc.metadata())
+                    .map(|metadata| metadata.title.trim())
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        book.path
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "Libro sin título".to_string());
                 self.annotations = Some(book.annotations);
                 self.toc_entries = book.toc;
+                self.nav_model.clear();
+                for (idx, entry) in self.toc_entries.iter().enumerate() {
+                    self.nav_model
+                        .insert()
+                        .text(entry.title.clone())
+                        .indent(entry.level as u16)
+                        .data(idx);
+                }
                 self.spine_progress = (book.spine_idx + 1, book.spine_len);
                 self.status = None;
                 self.reset_reader_scroll();
@@ -313,18 +396,20 @@ impl Application for App {
                 self.document = None;
                 self.annotations = None;
                 self.toc_entries.clear();
+                self.nav_model.clear();
                 self.current_blocks.clear();
+                self.book_title.clear();
                 self.chapter_title.clear();
                 self.spine_progress = (0, 0);
                 self.search_results.clear();
                 self.search_query.clear();
                 self.sidebar_open = false;
                 self.reading_panel_open = false;
-                self.menu_open = false;
                 self.showing_image = false;
                 self.status = None;
                 self.epub_fonts.clear();
                 self.css_rules.clear();
+                self.book_css_rules.clear();
                 self.font_faces.clear();
                 self.font_name_map = FontNameMap::default();
                 self.image_metadata_cache.borrow_mut().clear();
@@ -361,34 +446,11 @@ impl Application for App {
                 self.load_chapter_sync();
             }
 
-            Message::ToggleSidebar => {
-                self.sidebar_open = !self.sidebar_open;
-                if self.sidebar_open {
-                    self.reading_panel_open = false;
-                    self.menu_open = false;
-                }
-            }
             Message::OpenSearchSidebar => {
                 self.sidebar_open = true;
-                self.sidebar_tab = SidebarTab::Search;
                 self.reading_panel_open = false;
-                self.menu_open = false;
-            }
-            Message::SelectSidebarTab(tab) => {
-                self.sidebar_tab = tab;
-            }
-            Message::SelectTocEntry(idx) => {
-                let hrefs: Vec<String> = self.toc_entries.iter().map(|e| e.href.clone()).collect();
-                if let Some(href) = hrefs.get(idx) {
-                    if let Some(ref mut doc) = self.document {
-                        if doc.goto_toc_href(href) {
-                            self.spine_progress = (doc.spine_index + 1, doc.spine_len());
-                            self.sidebar_open = false;
-                            self.showing_image = false;
-                            self.reset_reader_scroll();
-                            self.load_chapter_sync();
-                        }
-                    }
+                if self.core.nav_bar_active() {
+                    self.core.nav_bar_toggle();
                 }
             }
 
@@ -427,52 +489,33 @@ impl Application for App {
                 self.reading_panel_open = !self.reading_panel_open;
                 if self.reading_panel_open {
                     self.sidebar_open = false;
-                    self.menu_open = false;
+                    if self.core.nav_bar_active() {
+                        self.core.nav_bar_toggle();
+                    }
                 }
             }
-            Message::SetProfile(key) => {
-                self.settings.current_profile = key;
+            Message::SelectProfile(index) => {
+                let profiles = ["day", "sepia", "night"];
+                let Some(profile) = profiles.get(index) else {
+                    return Task::none();
+                };
+                self.settings.current_profile = (*profile).to_string();
                 self.invalidate_reader_layout();
                 let _ = self.settings.save();
             }
-            Message::FontIncrease => {
-                let current = (self.settings.font_size_pt / DEFAULT_READER_FONT_SIZE_PT * 10.0)
-                    .round()
-                    * 10.0;
-                let percent = (current + 10.0).min(200.0);
-                self.settings.font_size_pt = DEFAULT_READER_FONT_SIZE_PT * percent / 100.0;
+            Message::SelectFont(index) => {
+                let fonts = crate::ui::reading_panel::font_options(&self.epub_fonts);
+                let Some(font) = fonts.get(index) else {
+                    return Task::none();
+                };
+                self.settings.font_family = font.clone();
+                self.invalidate_reader_layout();
+                let _ = self.settings.save();
+            }
+            Message::FontSizeChanged(percent) => {
+                self.settings.font_size_pt =
+                    DEFAULT_READER_FONT_SIZE_PT * percent.clamp(60.0, 200.0) / 100.0;
                 self.update_style_map_sizes();
-                self.invalidate_reader_layout();
-                let _ = self.settings.save();
-            }
-            Message::FontDecrease => {
-                let current = (self.settings.font_size_pt / DEFAULT_READER_FONT_SIZE_PT * 10.0)
-                    .round()
-                    * 10.0;
-                let percent = (current - 10.0).max(60.0);
-                self.settings.font_size_pt = DEFAULT_READER_FONT_SIZE_PT * percent / 100.0;
-                self.update_style_map_sizes();
-                self.invalidate_reader_layout();
-                let _ = self.settings.save();
-            }
-            Message::FontReset => {
-                self.settings.font_size_pt = DEFAULT_READER_FONT_SIZE_PT;
-                self.update_style_map_sizes();
-                self.invalidate_reader_layout();
-                let _ = self.settings.save();
-            }
-            Message::SelectFont(name) => {
-                self.settings.font_family = name;
-                self.invalidate_reader_layout();
-                let _ = self.settings.save();
-            }
-            Message::LineHeightIncrease => {
-                self.settings.line_height = (self.settings.line_height + 0.1).min(2.5);
-                self.invalidate_reader_layout();
-                let _ = self.settings.save();
-            }
-            Message::LineHeightDecrease => {
-                self.settings.line_height = (self.settings.line_height - 0.1).max(1.0);
                 self.invalidate_reader_layout();
                 let _ = self.settings.save();
             }
@@ -487,13 +530,16 @@ impl Application for App {
                 let _ = self.settings.save();
             }
 
-            Message::ToggleMenu => {
-                self.menu_open = !self.menu_open;
-                if self.menu_open {
-                    self.reading_panel_open = false;
-                    self.sidebar_open = false;
+            Message::ToggleAbout => {
+                self.show_about = !self.show_about;
+                self.set_show_context(self.show_about);
+            }
+            Message::OpenUrl(url) => {
+                if let Err(error) = std::process::Command::new("xdg-open").arg(&url).spawn() {
+                    self.status = Some(format!("No se pudo abrir el enlace: {error}"));
                 }
             }
+
             Message::ToggleTts => {
                 if self.tts_engine.is_speaking() {
                     let _ = self.tts_engine.stop();
@@ -522,6 +568,45 @@ impl Application for App {
                 let metrics = self.reader_metrics.borrow();
                 let max_scroll = (metrics.total_h - metrics.viewport_h).max(0.0);
                 self.reader_scroll_y = scroll_y.clamp(0.0, max_scroll);
+                self.scroll_velocity = 0.0;
+                self.last_scroll_tick = None;
+            }
+            Message::ReaderWheel { delta, smooth } => {
+                let metrics = self.reader_metrics.borrow();
+                let max_scroll = (metrics.total_h - metrics.viewport_h).max(0.0);
+                drop(metrics);
+                if smooth {
+                    self.reader_scroll_y = (self.reader_scroll_y + delta).clamp(0.0, max_scroll);
+                    self.scroll_velocity = 0.0;
+                    self.last_scroll_tick = None;
+                } else {
+                    self.reader_scroll_y =
+                        (self.reader_scroll_y + delta * 0.25).clamp(0.0, max_scroll);
+                    self.scroll_velocity =
+                        (self.scroll_velocity + delta * 5.0).clamp(-2400.0, 2400.0);
+                    self.last_scroll_tick = None;
+                }
+            }
+            Message::ScrollAnimationTick(now) => {
+                let dt = self
+                    .last_scroll_tick
+                    .replace(now)
+                    .map_or(1.0 / 60.0, |last| {
+                        now.duration_since(last).as_secs_f32().clamp(0.0, 0.05)
+                    });
+                let metrics = self.reader_metrics.borrow();
+                let max_scroll = (metrics.total_h - metrics.viewport_h).max(0.0);
+                drop(metrics);
+                let previous = self.reader_scroll_y;
+                self.reader_scroll_y =
+                    (self.reader_scroll_y + self.scroll_velocity * dt).clamp(0.0, max_scroll);
+                self.scroll_velocity *= (-7.0 * dt).exp();
+                if self.scroll_velocity.abs() < 8.0
+                    || (self.reader_scroll_y - previous).abs() < f32::EPSILON
+                {
+                    self.scroll_velocity = 0.0;
+                    self.last_scroll_tick = None;
+                }
             }
 
             Message::PageDown => {
@@ -529,12 +614,16 @@ impl Application for App {
                 let page = metrics.viewport_h * 0.9;
                 let max_scroll = (metrics.total_h - metrics.viewport_h).max(0.0);
                 self.reader_scroll_y = (self.reader_scroll_y + page).min(max_scroll);
+                self.scroll_velocity = 0.0;
+                self.last_scroll_tick = None;
             }
 
             Message::PageUp => {
                 let metrics = self.reader_metrics.borrow();
                 let page = metrics.viewport_h * 0.9;
                 self.reader_scroll_y = (self.reader_scroll_y - page).max(0.0);
+                self.scroll_velocity = 0.0;
+                self.last_scroll_tick = None;
             }
 
             Message::KeyPressed(key_event) => {
@@ -617,12 +706,7 @@ impl Application for App {
         let has_book = self.document.is_some();
 
         let body: Element<'_, Message> = if self.sidebar_open {
-            let panel = crate::ui::sidebar::view_sidebar(
-                &self.sidebar_tab,
-                &self.toc_entries,
-                &self.search_query,
-                &self.search_results,
-            );
+            let panel = crate::ui::sidebar::view_sidebar(&self.search_query, &self.search_results);
             let reader = crate::ui::reader_view::view_reader(
                 has_book,
                 &self.current_blocks,
@@ -700,7 +784,7 @@ impl Application for App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        event::listen_with(|event, status, _id| match event {
+        let keyboard = event::listen_with(|event, status, _id| match event {
             Event::Keyboard(key_event) => {
                 if status == EventStatus::Ignored {
                     Some(Message::KeyPressed(key_event))
@@ -709,7 +793,13 @@ impl Application for App {
                 }
             }
             _ => None,
-        })
+        });
+        let animation = if self.scroll_velocity.abs() >= 8.0 {
+            cosmic::iced::time::every(Duration::from_millis(16)).map(Message::ScrollAnimationTick)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([keyboard, animation])
     }
 }
 
@@ -732,6 +822,54 @@ impl App {
                 } else {
                     format!("[{}]", alt)
                 }),
+                ContentBlock::Inline { nodes, .. } => Some(
+                    nodes
+                        .iter()
+                        .map(|node| match node {
+                            folio::content::InlineNode::Text(span) => span.text.clone(),
+                            folio::content::InlineNode::LineBreak => "\n".to_string(),
+                            folio::content::InlineNode::Image { alt, .. } if !alt.is_empty() => {
+                                format!("[{alt}]")
+                            }
+                            folio::content::InlineNode::Image { .. } => "[Imagen]".to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+                ContentBlock::Table { rows, .. } => Some(
+                    rows.iter()
+                        .map(|row| {
+                            row.cells
+                                .iter()
+                                .map(|cell| cell.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                ContentBlock::List { ordered, items, .. } => Some(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let prefix = if *ordered {
+                                format!("{}. ", index + 1)
+                            } else {
+                                "• ".to_string()
+                            };
+                            format!(
+                                "{}{}",
+                                prefix,
+                                item.spans
+                                    .iter()
+                                    .map(|span| span.text.as_str())
+                                    .collect::<String>()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
                 ContentBlock::Separator => None,
             })
             .collect::<Vec<_>>()
@@ -740,9 +878,11 @@ impl App {
 
     fn load_chapter_sync(&mut self) {
         if let Some(ref mut doc) = self.document {
-            match doc.current_chapter_blocks() {
-                Ok(blocks) => {
+            match doc.current_chapter_content() {
+                Ok((blocks, chapter_rules)) => {
                     self.current_blocks = blocks;
+                    self.css_rules = self.book_css_rules.clone();
+                    self.css_rules.extend(chapter_rules);
                     self.chapter_title = extract_heading(&self.current_blocks);
                 }
                 Err(e) => {
@@ -763,10 +903,12 @@ impl App {
                     self.chapter_title.clear();
                 }
             }
-            let title = if self.chapter_title.is_empty() {
+            let title = if self.book_title.is_empty() {
                 "Folio".to_string()
+            } else if self.chapter_title.is_empty() {
+                self.book_title.clone()
             } else {
-                self.chapter_title.clone()
+                format!("{} — {}", self.book_title, self.chapter_title)
             };
             self.set_header_title(title);
         }
@@ -816,6 +958,8 @@ impl App {
 
     fn reset_reader_scroll(&mut self) {
         self.reader_scroll_y = 0.0;
+        self.scroll_velocity = 0.0;
+        self.last_scroll_tick = None;
         *self.reader_metrics.borrow_mut() = ReaderMetrics::default();
         self.invalidate_reader_layout();
     }

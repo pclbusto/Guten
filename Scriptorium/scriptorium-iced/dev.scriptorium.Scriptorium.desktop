@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Scriptorium
+GenericName=Gestor de biblioteca de libros electrónicos
+Comment=Administra y organiza tu biblioteca de libros EPUB con libcosmic
+Exec=scriptorium-iced %f
+Icon=dev.scriptorium.Scriptorium
+Terminal=false
+StartupNotify=true
+StartupWMClass=dev.scriptorium.Scriptorium
+Categories=Office;Viewer;Database;
+MimeType=application/epub+zip;
+Keywords=EPUB;libros;biblioteca;organizador;gestor;ebook;

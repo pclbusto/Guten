@@ -3,7 +3,7 @@ use cosmic::iced::font::{Style, Weight};
 use cosmic::iced::widget::{rich_text, span};
 use cosmic::iced::{Color, Font, Length};
 
-use crate::content::{self, ContentBlock, StyleMap, StyledSpan};
+use crate::content::{self, ContentBlock, InlineBlockKind, InlineNode, StyleMap, StyledSpan};
 use crate::css::{self, CssRule, ResolvedStyle};
 
 pub fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -23,6 +23,24 @@ pub fn extract_heading(blocks: &[ContentBlock]) -> String {
             let text: String = spans
                 .iter()
                 .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !text.is_empty() {
+                return text;
+            }
+        } else if let ContentBlock::Inline {
+            kind: InlineBlockKind::Heading(_),
+            nodes,
+            ..
+        } = block
+        {
+            let text = nodes
+                .iter()
+                .filter_map(|node| match node {
+                    InlineNode::Text(span) => Some(span.text.as_str()),
+                    InlineNode::LineBreak => Some("\n"),
+                    InlineNode::Image { .. } => None,
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             if !text.is_empty() {
@@ -177,6 +195,47 @@ pub fn render_blocks_to_elements<M: Clone + 'static>(
                         .height(6.0)
                         .into(),
                 );
+            }
+            ContentBlock::Inline { nodes, .. } => {
+                let label = nodes
+                    .iter()
+                    .map(|node| match node {
+                        InlineNode::Text(span) => span.text.clone(),
+                        InlineNode::LineBreak => "\n".to_string(),
+                        InlineNode::Image { alt, .. } if !alt.is_empty() => {
+                            format!("[Imagen: {alt}]")
+                        }
+                        InlineNode::Image { .. } => "[Imagen]".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                elements.push(cosmic::widget::text::body(label).into());
+            }
+            ContentBlock::Table { rows, .. } => {
+                for row in rows {
+                    let text = row
+                        .cells
+                        .iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    elements.push(cosmic::widget::text::body(text).into());
+                }
+            }
+            ContentBlock::List { ordered, items, .. } => {
+                for (index, item) in items.iter().enumerate() {
+                    let prefix = if *ordered {
+                        format!("{}. ", index + 1)
+                    } else {
+                        "• ".to_string()
+                    };
+                    let text = item
+                        .spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>();
+                    elements.push(cosmic::widget::text::body(format!("{prefix}{text}")).into());
+                }
             }
             ContentBlock::Separator => {
                 elements.push(

@@ -1,9 +1,14 @@
 [Desktop Entry]
-Name=Rúbrica
-Comment=Editor de EPUB con libcosmic
 Type=Application
-Exec=rubrica-cosmic %F
-Icon=text-editor
+Version=1.0
+Name=Rúbrica
+GenericName=Editor de libros electrónicos
+Comment=Editor de EPUB con libcosmic
+Exec=rubrica-cosmic %f
+Icon=com.gutenair.RubricaCosmic
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.gutenair.RubricaCosmic
 Categories=Office;Publishing;
 MimeType=application/epub+zip;
-Terminal=false
+Keywords=EPUB;editor;ebook;libro;

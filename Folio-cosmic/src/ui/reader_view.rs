@@ -6,6 +6,7 @@ use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget::{self, button, column, container, text};
 
 use crate::app::Message;
+use crate::settings::ReaderSettings;
 use folio::content::{ContentBlock, StyleMap};
 use folio::css::CssRule;
 use folio::fonts::FontNameMap;
@@ -17,7 +18,7 @@ pub fn view_reader<'a>(
     document_loaded: bool,
     current_blocks: &'a [ContentBlock],
     style_map: &'a StyleMap,
-    settings: &'a crate::settings::ReaderSettings,
+    settings: &'a ReaderSettings,
     font_name_map: &'a FontNameMap,
     css_rules: &'a [CssRule],
     bg_color: Color,
@@ -28,11 +29,29 @@ pub fn view_reader<'a>(
     reader_layout_cache: Rc<RefCell<ReaderLayoutCache>>,
 ) -> Element<'a, Message> {
     if !document_loaded {
+        let recent: Vec<Element<'a, Message>> = settings
+            .recent_books
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Libro");
+                button::standard(format!("Ctrl+{}   {}", index + 1, name))
+                    .on_press(Message::OpenRecent(index))
+                    .width(Length::Fixed(420.0))
+                    .into()
+            })
+            .collect();
+        let recent_list = cosmic::widget::Column::with_children(recent).spacing(4);
         return container(
             column!(
                 text::heading("Folio").size(32.0),
                 text::body("Abr\u{ed} un EPUB para comenzar").size(16.0),
                 button::standard("Abrir libro").on_press(Message::OpenFile),
+                text::heading("Libros recientes").size(20.0),
+                recent_list,
             )
             .spacing(16)
             .align_x(Alignment::Center)
@@ -42,10 +61,6 @@ pub fn view_reader<'a>(
         .height(Length::Fill)
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
-        .style(move |_theme: &cosmic::Theme| widget::container::Style {
-            background: Some(cosmic::iced::Background::Color(bg_color)),
-            ..Default::default()
-        })
         .into();
     }
 
@@ -81,6 +96,7 @@ pub fn view_reader<'a>(
         image_metadata_cache,
         reader_layout_cache,
         |y| Message::SetReaderScroll(y),
+        |delta, smooth| Message::ReaderWheel { delta, smooth },
         |src| Message::ImageClicked(src),
     );
 
@@ -88,8 +104,14 @@ pub fn view_reader<'a>(
         .width(Length::Fill)
         .height(Length::Fill);
 
+    let horizontal_margin = (settings.margin_em * settings.font_size_pt).clamp(0.0, 160.0) as u16;
     container(canvas_widget)
         .width(Length::Fill)
         .height(Length::Fill)
+        .padding([0, horizontal_margin])
+        .style(move |_theme: &cosmic::Theme| widget::container::Style {
+            background: Some(cosmic::iced::Background::Color(bg_color)),
+            ..Default::default()
+        })
         .into()
 }

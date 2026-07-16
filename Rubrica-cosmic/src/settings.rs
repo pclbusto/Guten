@@ -24,12 +24,11 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn load() -> Self {
         let path = Self::settings_path();
-        if path.exists() {
-            if let Ok(json) = fs::read_to_string(&path) {
-                if let Ok(settings) = serde_json::from_str(&json) {
-                    return settings;
-                }
-            }
+        if path.exists()
+            && let Ok(json) = fs::read_to_string(&path)
+            && let Ok(settings) = serde_json::from_str(&json)
+        {
+            return settings;
         }
         Self::default()
     }
