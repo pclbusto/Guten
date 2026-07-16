@@ -55,7 +55,10 @@ impl GutenCore {
         // 2. Fix void elements (HTML5 -> XHTML) for roxmltree compatibility
         let fixed_content = crate::guardian::html5_to_xhtml_void_elements(&clean_content);
 
-        let doc = roxmltree::Document::parse(&fixed_content).map_err(|e| {
+        // 3. Replace common HTML entities that are not predefined in XML
+        let normalized_content = Self::normalize_html_entities(&fixed_content);
+
+        let doc = roxmltree::Document::parse(&normalized_content).map_err(|e| {
             crate::error::GutenError::InvalidProject(format!("XML error in {}: {}", href, e))
         })?;
 
@@ -66,7 +69,14 @@ impl GutenCore {
             if tag.len() == 2 && tag.starts_with('h') {
                 if let Ok(level) = tag[1..].parse::<u8>() {
                     if (1..=6).contains(&level) {
-                        let title = node.text().unwrap_or("").trim().to_string();
+                        let title = node
+                            .descendants()
+                            .filter(|n| n.is_text())
+                            .filter_map(|n| n.text())
+                            .collect::<Vec<_>>()
+                            .join("")
+                            .trim()
+                            .to_string();
                         let anchor = node.attribute("id").unwrap_or("").to_string();
 
                         items.push(HeadingItem {
@@ -86,6 +96,111 @@ impl GutenCore {
             items,
             include: true,
         })
+    }
+
+    /// Reemplaza entidades HTML nombradas (que no están predefinidas en XML)
+    /// por entidades numéricas equivalentes, para que roxmltree pueda parsear
+    /// documentos XHTML que provengan de fuentes HTML o editores poco estrictos.
+    fn normalize_html_entities(content: &str) -> String {
+        use std::collections::HashMap;
+        use std::sync::OnceLock;
+
+        static ENTITIES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+        let entities = ENTITIES.get_or_init(|| {
+            let mut m = HashMap::new();
+            // XML predefined entities: keep as-is
+            m.insert("amp", "&amp;");
+            m.insert("lt", "&lt;");
+            m.insert("gt", "&gt;");
+            m.insert("quot", "&quot;");
+            m.insert("apos", "&apos;");
+            // Common HTML named entities -> numeric equivalents
+            m.insert("nbsp", "&#160;");
+            m.insert("copy", "&#169;");
+            m.insert("reg", "&#174;");
+            m.insert("trade", "&#8482;");
+            m.insert("ndash", "&#8211;");
+            m.insert("mdash", "&#8212;");
+            m.insert("lsquo", "&#8216;");
+            m.insert("rsquo", "&#8217;");
+            m.insert("ldquo", "&#8220;");
+            m.insert("rdquo", "&#8221;");
+            m.insert("laquo", "&#171;");
+            m.insert("raquo", "&#187;");
+            m.insert("hellip", "&#8230;");
+            m.insert("bull", "&#8226;");
+            m.insert("middot", "&#183;");
+            m.insert("eacute", "&#233;");
+            m.insert("Eacute", "&#201;");
+            m.insert("iacute", "&#237;");
+            m.insert("Iacute", "&#205;");
+            m.insert("oacute", "&#243;");
+            m.insert("Oacute", "&#211;");
+            m.insert("uacute", "&#250;");
+            m.insert("Uacute", "&#218;");
+            m.insert("aacute", "&#225;");
+            m.insert("Aacute", "&#193;");
+            m.insert("ntilde", "&#241;");
+            m.insert("Ntilde", "&#209;");
+            m.insert("iquest", "&#191;");
+            m.insert("iexcl", "&#161;");
+            m.insert("ordf", "&#170;");
+            m.insert("ordm", "&#186;");
+            m.insert("deg", "&#176;");
+            m.insert("plusmn", "&#177;");
+            m.insert("para", "&#182;");
+            m.insert("sect", "&#167;");
+            m.insert("cent", "&#162;");
+            m.insert("pound", "&#163;");
+            m.insert("yen", "&#165;");
+            m.insert("euro", "&#8364;");
+            m
+        });
+
+        let mut result = String::with_capacity(content.len());
+        let mut chars = content.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '&' {
+                let mut name = String::new();
+                let mut is_entity = true;
+                while let Some(&next) = chars.peek() {
+                    if next == ';' {
+                        chars.next();
+                        break;
+                    }
+                    if next.is_alphanumeric() {
+                        name.push(next);
+                        chars.next();
+                    } else {
+                        is_entity = false;
+                        break;
+                    }
+                }
+
+                if is_entity && !name.is_empty() {
+                    if let Some(&replacement) = entities.get(name.as_str()) {
+                        result.push_str(replacement);
+                    } else if name.starts_with('#') {
+                        // Already a numeric entity; keep as-is.
+                        result.push('&');
+                        result.push_str(&name);
+                        result.push(';');
+                    } else {
+                        // Unknown named entity: replace with a space to keep
+                        // the parser happy while preserving some readability.
+                        result.push(' ');
+                    }
+                } else {
+                    result.push('&');
+                    result.push_str(&name);
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        result
     }
 
     /// Elimina la declaración <!DOCTYPE ...> de un string XML

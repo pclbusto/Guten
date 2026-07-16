@@ -1,5 +1,5 @@
 use crate::core::GutenCore;
-use crate::error::Result;
+use crate::error::{GutenError, Result};
 use std::fs::File;
 use std::io::{Write, Read};
 use std::path::Path;
@@ -176,6 +176,8 @@ impl GutenCore {
     /// - [EPUB 3.3 Specification - OCF](https://www.w3.org/TR/epub/#sec-ocf) - Especificación oficial
     /// - [ZIP Archive Format](https://pkware.com/documents/casestudies/APPNOTE.TXT)
     pub fn export_epub(&mut self, output_path: impl AsRef<Path>) -> Result<()> {
+        let output_path = output_path.as_ref();
+
         // 1. Validate integrity before export
         let errors = self.validate_integrity();
         if !errors.is_empty() {
@@ -188,7 +190,15 @@ impl GutenCore {
         // 3. Save current state to OPF
         self.save()?;
 
-        let file = File::create(output_path)?;
+        // Construir junto al destino y reemplazarlo solamente cuando el ZIP
+        // esté completamente terminado. Así un error nunca trunca el EPUB
+        // original.
+        let parent = output_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let file = temporary.reopen()?;
         let mut zip = zip::ZipWriter::new(file);
 
         // --- RULE OF GOLD ---
@@ -228,8 +238,25 @@ impl GutenCore {
             }
         }
 
-        zip.finish()?;
+        let file = zip.finish()?;
+        file.sync_all()?;
+        temporary
+            .persist(output_path)
+            .map_err(|error| GutenError::Io(error.error))?;
         Ok(())
+    }
+
+    /// Guarda nuevamente un EPUB abierto con [`GutenCore::open_epub`] en su
+    /// ruta original. El archivo original se reemplaza atómicamente solo tras
+    /// construir y sincronizar correctamente el EPUB actualizado.
+    pub fn save_epub(&mut self) -> Result<()> {
+        let target = self.original_epub.clone().ok_or_else(|| {
+            GutenError::InvalidProject(
+                "The project was not opened from an EPUB; use export_epub with a destination"
+                    .to_string(),
+            )
+        })?;
+        self.export_epub(target)
     }
 
     /// Realiza una "Alineación Total" de los estilos en todo el proyecto

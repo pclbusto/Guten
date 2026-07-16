@@ -9,11 +9,12 @@ use cosmic::{ApplicationExt, Element, executor};
 use scriptorium::analytics::{Analytics, LibraryMetrics};
 use scriptorium::library_db::{BookDetail, BookListItem, LibraryDb};
 use scriptorium::pipeline::{ImportStatus, Pipeline};
-use std::collections::HashMap;
+use scriptorium::sync::SyncSubsystem;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,6 +28,7 @@ const COVER_LOAD_CONCURRENCY: usize = 4;
 const COVER_THUMBNAIL_WIDTH: u32 = 360;
 const COVER_THUMBNAIL_HEIGHT: u32 = 540;
 const COVER_CACHE_VERSION: &str = "v2-thumb-360x540";
+const OPDS_SERVER_PORT: u16 = 8080;
 static COVER_CACHE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +98,12 @@ pub struct LoadedBooks {
     page: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct SystemApp {
+    id: String,
+    name: String,
+}
+
 pub struct App {
     core: Core,
     db: Option<LibraryDb>,
@@ -112,11 +120,17 @@ pub struct App {
     title_edit: String,
     author_edit: String,
     show_edit_dialog: bool,
+    show_delete_dialog: bool,
     selected_card_design: String,
     hovered_card: Option<(i64, &'static str)>,
     loading: bool,
     status: Option<String>,
+    pending_status: Option<String>,
     covers_per_page: usize,
+    opds_server_enabled: bool,
+    epub_apps: Vec<SystemApp>,
+    reader_app_id: Option<String>,
+    editor_app_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,14 +155,24 @@ pub enum Message {
     OpenEditDialog,
     CloseEditDialog,
     MetadataSaved(Result<(), String>),
+    OpenDeleteDialog,
+    CloseDeleteDialog,
+    DeleteBook { delete_file: bool },
+    BookDeleted(Result<Option<String>, String>),
     ReadBook,
     BookOpened(Result<(), String>),
+    EditBook,
+    BookEdited(Result<(), String>),
     QuickAction(&'static str),
     CardDesignSelected(String),
     PageSizeSelected(usize),
     LibraryPageSelected(usize),
     CoverLoaded(Result<(i64, String, Option<cosmic::iced::widget::image::Handle>), String>),
     CardHoverChanged(Option<(i64, &'static str)>),
+    EnableOpdsServer,
+    OpdsServerEnabled(Result<String, String>),
+    ReaderAppSelected(Option<String>),
+    EditorAppSelected(Option<String>),
 }
 
 impl cosmic::Application for App {
@@ -183,11 +207,17 @@ impl cosmic::Application for App {
             title_edit: String::new(),
             author_edit: String::new(),
             show_edit_dialog: false,
+            show_delete_dialog: false,
             selected_card_design: load_card_design_preference(),
             hovered_card: None,
             loading: true,
             status: None,
+            pending_status: None,
             covers_per_page: load_page_size_preference(),
+            opds_server_enabled: false,
+            epub_apps: discover_epub_apps(),
+            reader_app_id: load_app_preference(AppRole::Reader),
+            editor_app_id: load_app_preference(AppRole::Editor),
         };
 
         app.set_header_title("Scriptorium".into());
@@ -274,28 +304,56 @@ impl cosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
-        if !self.show_edit_dialog || !matches!(&self.page, Page::Detail(_)) {
-            return None;
-        }
+        if let Page::Detail(book) = &self.page {
+            if self.show_delete_dialog {
+                return Some(
+                    cosmic::widget::dialog()
+                        .title("Eliminar libro")
+                        .body(format!(
+                            "¿Qué querés hacer con “{}”? Quitar de la biblioteca conserva el archivo EPUB en disco.",
+                            book.title
+                        ))
+                        .primary_action(
+                            button::destructive("Quitar de la biblioteca")
+                                .on_press(Message::DeleteBook { delete_file: false }),
+                        )
+                        .secondary_action(
+                            button::destructive("Eliminar archivo también")
+                                .on_press(Message::DeleteBook { delete_file: true }),
+                        )
+                        .tertiary_action(
+                            button::standard("Cancelar").on_press(Message::CloseDeleteDialog),
+                        )
+                        .into(),
+                );
+            }
 
-        Some(
-            cosmic::widget::dialog()
-                .title("Editar metadatos")
-                .body("Los cambios disponibles actualmente se limitan al título y al autor.")
-                .control(
-                    text_input::text_input("Título", &self.title_edit)
-                        .on_input(Message::TitleChanged),
-                )
-                .control(
-                    text_input::text_input("Autor", &self.author_edit)
-                        .on_input(Message::AuthorChanged),
-                )
-                .primary_action(
-                    button::suggested("Guardar cambios").on_press(Message::SaveMetadata),
-                )
-                .secondary_action(button::standard("Cancelar").on_press(Message::CloseEditDialog))
-                .into(),
-        )
+            if self.show_edit_dialog {
+                return Some(
+                    cosmic::widget::dialog()
+                        .title("Editar metadatos")
+                        .body(
+                            "Los cambios disponibles actualmente se limitan al título y al autor.",
+                        )
+                        .control(
+                            text_input::text_input("Título", &self.title_edit)
+                                .on_input(Message::TitleChanged),
+                        )
+                        .control(
+                            text_input::text_input("Autor", &self.author_edit)
+                                .on_input(Message::AuthorChanged),
+                        )
+                        .primary_action(
+                            button::suggested("Guardar cambios").on_press(Message::SaveMetadata),
+                        )
+                        .secondary_action(
+                            button::standard("Cancelar").on_press(Message::CloseEditDialog),
+                        )
+                        .into(),
+                );
+            }
+        }
+        None
     }
 
     fn on_search(&mut self) -> Task<Self::Message> {
@@ -309,7 +367,9 @@ impl cosmic::Application for App {
     }
 
     fn on_escape(&mut self) -> Task<Self::Message> {
-        if self.show_edit_dialog {
+        if self.show_delete_dialog {
+            self.show_delete_dialog = false;
+        } else if self.show_edit_dialog {
             self.show_edit_dialog = false;
         } else if self.search_active {
             self.search_active = false;
@@ -407,7 +467,7 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
                     app.total_books_count = loaded.total_count;
                     app.library_page = loaded.page;
                     app.hovered_card = None;
-                    app.status = None;
+                    app.status = app.pending_status.take();
                     let semaphore = Arc::new(tokio::sync::Semaphore::new(COVER_LOAD_CONCURRENCY));
                     let mut cover_tasks = Vec::new();
                     for book in loaded.raw_books {
@@ -458,6 +518,7 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
             app.page = Page::Main;
             app.hovered_card = None;
             app.show_edit_dialog = false;
+            app.show_delete_dialog = false;
             if !matches!(section, Section::Library | Section::List) {
                 app.search_active = false;
                 app.search.clear();
@@ -599,6 +660,7 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
                     app.title_edit = book.title.clone();
                     app.author_edit = book.author_name.clone();
                     app.page = Page::Detail(book);
+                    app.show_delete_dialog = false;
                     app.status = None;
                 }
                 Ok(None) => app.status = Some("El libro ya no existe.".into()),
@@ -641,19 +703,85 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::OpenEditDialog => {
             app.show_edit_dialog = true;
+            app.show_delete_dialog = false;
             Task::none()
         }
         Message::CloseEditDialog => {
             app.show_edit_dialog = false;
             Task::none()
         }
+        Message::OpenDeleteDialog => {
+            app.show_delete_dialog = true;
+            app.show_edit_dialog = false;
+            Task::none()
+        }
+        Message::CloseDeleteDialog => {
+            app.show_delete_dialog = false;
+            Task::none()
+        }
+        Message::DeleteBook { delete_file } => {
+            let (Some(db), Page::Detail(book)) = (app.db.clone(), &app.page) else {
+                return Task::none();
+            };
+            app.loading = true;
+            app.show_delete_dialog = false;
+            perform(delete_book(db, book.id, delete_file), Message::BookDeleted)
+        }
+        Message::BookDeleted(result) => {
+            app.loading = false;
+            match result {
+                Ok(deleted_file) => {
+                    app.page = Page::Main;
+                    app.section = Section::Library;
+                    app.show_edit_dialog = false;
+                    app.show_delete_dialog = false;
+                    app.status = if let Some(path) = deleted_file {
+                        Some(format!("Libro eliminado y archivo borrado: {path}"))
+                    } else {
+                        Some("Libro quitado de la biblioteca.".into())
+                    };
+                    app.pending_status = app.status.clone();
+                    app.hovered_card = None;
+                    let Some(db) = app.db.clone() else {
+                        return Task::none();
+                    };
+                    app.loading = true;
+                    perform(
+                        load_books(db, normalized_query(&app.search), 0, app.covers_per_page),
+                        Message::BooksLoaded,
+                    )
+                }
+                Err(error) => {
+                    app.status = Some(error);
+                    Task::none()
+                }
+            }
+        }
         Message::ReadBook => {
             let Page::Detail(book) = &app.page else {
                 return Task::none();
             };
-            perform(open_book(book.current_path.clone()), Message::BookOpened)
+            perform(
+                open_book(book.current_path.clone(), app.reader_app_id.clone()),
+                Message::BookOpened,
+            )
         }
         Message::BookOpened(result) => {
+            if let Err(error) = result {
+                app.status = Some(error);
+            }
+            Task::none()
+        }
+        Message::EditBook => {
+            let Page::Detail(book) = &app.page else {
+                return Task::none();
+            };
+            perform(
+                edit_book(book.current_path.clone(), app.editor_app_id.clone()),
+                Message::BookEdited,
+            )
+        }
+        Message::BookEdited(result) => {
             if let Err(error) = result {
                 app.status = Some(error);
             }
@@ -677,8 +805,12 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::PageSizeSelected(size) => {
             let size = size.clamp(
-                *COVERS_PER_PAGE_OPTIONS.first().unwrap_or(&DEFAULT_COVERS_PER_PAGE),
-                *COVERS_PER_PAGE_OPTIONS.last().unwrap_or(&DEFAULT_COVERS_PER_PAGE),
+                *COVERS_PER_PAGE_OPTIONS
+                    .first()
+                    .unwrap_or(&DEFAULT_COVERS_PER_PAGE),
+                *COVERS_PER_PAGE_OPTIONS
+                    .last()
+                    .unwrap_or(&DEFAULT_COVERS_PER_PAGE),
             );
             app.covers_per_page = size;
             app.status = match save_page_size_preference(size) {
@@ -703,12 +835,55 @@ fn update_app(app: &mut App, message: Message) -> Task<Message> {
             };
             app.loading = true;
             perform(
-                load_books(db, normalized_query(&app.search), target_page, app.covers_per_page),
+                load_books(
+                    db,
+                    normalized_query(&app.search),
+                    target_page,
+                    app.covers_per_page,
+                ),
                 Message::BooksLoaded,
             )
         }
         Message::CardHoverChanged(card) => {
             app.hovered_card = card;
+            Task::none()
+        }
+        Message::EnableOpdsServer => {
+            if app.opds_server_enabled {
+                app.status = Some(opds_browser_status());
+                return Task::none();
+            }
+            let Some(db) = app.db.clone() else {
+                app.status = Some("La base de datos todavía no está disponible.".into());
+                return Task::none();
+            };
+            app.status = Some("Iniciando servidor web…".into());
+            perform(start_opds_server(db), Message::OpdsServerEnabled)
+        }
+        Message::OpdsServerEnabled(result) => {
+            match result {
+                Ok(status) => {
+                    app.opds_server_enabled = true;
+                    app.status = Some(status);
+                }
+                Err(error) => app.status = Some(error),
+            }
+            Task::none()
+        }
+        Message::ReaderAppSelected(app_id) => {
+            app.reader_app_id = app_id;
+            app.status = match save_app_preference(AppRole::Reader, app.reader_app_id.as_deref()) {
+                Ok(()) => Some("Aplicación de lectura actualizada.".into()),
+                Err(error) => Some(error),
+            };
+            Task::none()
+        }
+        Message::EditorAppSelected(app_id) => {
+            app.editor_app_id = app_id;
+            app.status = match save_app_preference(AppRole::Editor, app.editor_app_id.as_deref()) {
+                Ok(()) => Some("Aplicación de edición actualizada.".into()),
+                Err(error) => Some(error),
+            };
             Task::none()
         }
     }
@@ -1529,6 +1704,21 @@ fn settings_view(app: &App) -> Element<'_, Message> {
             text("Cantidad de libros que se muestran en cada página de la biblioteca."),
             page_size_picker(app),
             divider::horizontal::default(),
+            text("Aplicaciones").size(20).font(cosmic::font::bold()),
+            text("Elegí qué aplicación abre los EPUB para lectura y cuál se usa para edición."),
+            app_selector(
+                "Leer EPUB",
+                &app.epub_apps,
+                app.reader_app_id.as_deref(),
+                Message::ReaderAppSelected,
+            ),
+            app_selector(
+                "Editar EPUB",
+                &app.epub_apps,
+                app.editor_app_id.as_deref(),
+                Message::EditorAppSelected,
+            ),
+            divider::horizontal::default(),
             text("Diseño de las tarjetas").size(20).font(cosmic::font::bold()),
             text("Elegí una opción. La misma implementación se usa en esta vista previa y en Biblioteca."),
             picker,
@@ -1536,11 +1726,117 @@ fn settings_view(app: &App) -> Element<'_, Message> {
             divider::horizontal::default(),
             text("Directorio de la biblioteca").size(18),
             text(library_path),
-            text("Sincronización OPDS y dispositivos MTP se incorporará en la siguiente etapa."),
+            divider::horizontal::default(),
+            text("Servidor web").size(20).font(cosmic::font::bold()),
+            text("Activa una vista web local de la biblioteca y el catálogo OPDS para lectores compatibles."),
+            opds_server_controls(app),
         ]
         .spacing(12),
     )
     .height(Length::Fill)
+    .into()
+}
+
+fn app_selector<'a>(
+    title: &'static str,
+    apps: &'a [SystemApp],
+    selected_id: Option<&'a str>,
+    message: fn(Option<String>) -> Message,
+) -> Element<'a, Message> {
+    let selected_label = selected_id
+        .and_then(|id| apps.iter().find(|app| app.id == id))
+        .map(|app| app.name.as_str())
+        .or(selected_id)
+        .unwrap_or("Predeterminada del sistema");
+
+    let mut options = column![
+        row![
+            text(title).size(16).font(cosmic::font::semibold()),
+            text(selected_label).size(14).width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+        app_option_button(
+            "Predeterminada del sistema",
+            selected_id.is_none(),
+            message(None),
+        ),
+    ]
+    .spacing(8);
+
+    if apps.is_empty() {
+        options =
+            options.push(text("No se encontraron aplicaciones registradas para EPUB.").size(13));
+    } else {
+        for app_row in apps.chunks(3) {
+            let mut row_widgets = row![].spacing(8);
+            for app in app_row {
+                row_widgets = row_widgets.push(app_option_button(
+                    app.name.clone(),
+                    selected_id == Some(app.id.as_str()),
+                    message(Some(app.id.clone())),
+                ));
+            }
+            for _ in app_row.len()..3 {
+                row_widgets = row_widgets.push(container("").width(Length::FillPortion(1)));
+            }
+            options = options.push(row_widgets);
+        }
+    }
+
+    container(options)
+        .padding(16)
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::Card)
+        .into()
+}
+
+fn app_option_button<'a>(
+    label: impl Into<String>,
+    selected: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    let button = if selected {
+        button::suggested(label.into())
+    } else {
+        button::standard(label.into()).on_press(message)
+    };
+    button.width(Length::FillPortion(1)).into()
+}
+
+fn opds_server_controls(app: &App) -> Element<'_, Message> {
+    let browser_url = opds_browser_url();
+    let opds_url = opds_catalog_url();
+    let action: Element<'_, Message> = if app.opds_server_enabled {
+        button::suggested("Servidor activo").into()
+    } else {
+        button::standard("Habilitar servidor web")
+            .on_press(Message::EnableOpdsServer)
+            .into()
+    };
+
+    container(
+        column![
+            row![
+                action,
+                column![text(browser_url).size(14), text(opds_url).size(13),]
+                    .spacing(2)
+                    .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            text(if app.opds_server_enabled {
+                "Disponible hasta cerrar Scriptorium."
+            } else {
+                "El servidor escucha en la red local al activarse."
+            })
+            .size(13),
+        ]
+        .spacing(8),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .class(cosmic::theme::Container::Card)
     .into()
 }
 
@@ -1709,7 +2005,9 @@ fn detail_page<'a>(app: &'a App, book: &'a BookDetail) -> Element<'a, Message> {
                     .font(cosmic::font::bold())
                     .width(Length::Fill),
                 button::standard("Editar").on_press(Message::OpenEditDialog),
+                button::destructive("Eliminar").on_press(Message::OpenDeleteDialog),
             ]
+            .spacing(8)
             .align_y(Alignment::Center),
             row![
                 column![
@@ -1752,7 +2050,11 @@ fn detail_page<'a>(app: &'a App, book: &'a BookDetail) -> Element<'a, Message> {
             ],
             text("TODO: conectar el progreso almacenado del libro.").size(14),
             text("Aún no has comenzado a leer este libro.").size(14),
-            button::suggested("Comenzar a leer").on_press(Message::ReadBook),
+            row![
+                button::suggested("Comenzar a leer").on_press(Message::ReadBook),
+                button::standard("Editar EPUB").on_press(Message::EditBook),
+            ]
+            .spacing(8),
         ]
         .spacing(12)
         .align_x(Alignment::Center),
@@ -1911,16 +2213,39 @@ fn normalized_query(query: &str) -> Option<String> {
     (!query.is_empty()).then(|| format!("{query}*"))
 }
 
-fn card_design_preference_path() -> Option<PathBuf> {
-    let config_root = std::env::var_os("XDG_CONFIG_HOME")
+#[derive(Debug, Clone, Copy)]
+enum AppRole {
+    Reader,
+    Editor,
+}
+
+impl AppRole {
+    fn preference_file(self) -> &'static str {
+        match self {
+            Self::Reader => "reader-app",
+            Self::Editor => "editor-app",
+        }
+    }
+}
+
+fn config_root() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME")
                 .filter(|path| !path.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
-        })?;
-    Some(config_root.join("scriptorium").join("card-design"))
+        })
+        .map(|root| root.join("scriptorium"))
+}
+
+fn config_path(file_name: &str) -> Option<PathBuf> {
+    Some(config_root()?.join(file_name))
+}
+
+fn card_design_preference_path() -> Option<PathBuf> {
+    config_path("card-design")
 }
 
 fn load_card_design_preference() -> String {
@@ -1946,15 +2271,7 @@ fn save_card_design_preference(id: &str) -> Result<(), String> {
 }
 
 fn page_size_preference_path() -> Option<PathBuf> {
-    let config_root = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|path| !path.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })?;
-    Some(config_root.join("scriptorium").join("covers-per-page"))
+    config_path("covers-per-page")
 }
 
 fn load_page_size_preference() -> usize {
@@ -1964,8 +2281,7 @@ fn load_page_size_preference() -> usize {
     let Ok(text) = std::fs::read_to_string(path) else {
         return DEFAULT_COVERS_PER_PAGE;
     };
-    text
-        .trim()
+    text.trim()
         .parse::<usize>()
         .ok()
         .filter(|size| COVERS_PER_PAGE_OPTIONS.contains(size))
@@ -1984,11 +2300,144 @@ fn save_page_size_preference(size: usize) -> Result<(), String> {
         .map_err(|error| format!("No se pudo guardar el tamaño de página: {error}"))
 }
 
+fn app_preference_path(role: AppRole) -> Option<PathBuf> {
+    config_path(role.preference_file())
+}
+
+fn load_app_preference(role: AppRole) -> Option<String> {
+    let path = app_preference_path(role)?;
+    let id = std::fs::read_to_string(path).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+fn save_app_preference(role: AppRole, app_id: Option<&str>) -> Result<(), String> {
+    let path = app_preference_path(role)
+        .ok_or_else(|| "No se encontró un directorio de configuración.".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "La ruta de configuración no es válida.".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("No se pudo crear la configuración: {error}"))?;
+    match app_id {
+        Some(app_id) => std::fs::write(path, app_id)
+            .map_err(|error| format!("No se pudo guardar la aplicación: {error}")),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("No se pudo limpiar la aplicación: {error}")),
+        },
+    }
+}
+
+fn discover_epub_apps() -> Vec<SystemApp> {
+    let mut apps = Vec::new();
+    let mut seen = HashSet::new();
+
+    for dir in application_dirs() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Some(app) = parse_epub_desktop_app(&path) else {
+                continue;
+            };
+            if seen.insert(app.id.clone()) {
+                apps.push(app);
+            }
+        }
+    }
+
+    apps.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    apps
+}
+
+fn application_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").filter(|path| !path.is_empty()) {
+        dirs.push(PathBuf::from(home).join(".local/share/applications"));
+    }
+
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    dirs.extend(std::env::split_paths(&data_dirs).map(|path| path.join("applications")));
+    dirs
+}
+
+fn parse_epub_desktop_app(path: &Path) -> Option<SystemApp> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_desktop_entry = false;
+    let mut name = None;
+    let mut mime_types = None;
+    let mut hidden = false;
+    let mut no_display = false;
+
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "Name" => name = Some(value.to_string()),
+            "MimeType" => mime_types = Some(value.to_string()),
+            "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
+            "NoDisplay" => no_display = value.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+
+    if hidden || no_display {
+        return None;
+    }
+    let mime_types = mime_types?;
+    if !mime_types
+        .split(';')
+        .any(|mime| mime == "application/epub+zip")
+    {
+        return None;
+    }
+
+    Some(SystemApp {
+        id: path.file_name()?.to_str()?.to_string(),
+        name: name?,
+    })
+}
+
 async fn open_database() -> Result<DbHandle, String> {
     LibraryDb::new(&scriptorium::default_db_url())
         .await
         .map(DbHandle)
         .map_err(|error| format!("No se pudo abrir la base de datos: {error}"))
+}
+
+async fn start_opds_server(db: LibraryDb) -> Result<String, String> {
+    SyncSubsystem::start_opds_server(db, OPDS_SERVER_PORT)
+        .await
+        .map_err(|error| format!("No se pudo iniciar el servidor web: {error}"))?;
+    Ok(opds_browser_status())
+}
+
+fn opds_browser_status() -> String {
+    format!("Servidor web activo: {}", opds_browser_url())
+}
+
+fn opds_browser_url() -> String {
+    format!("http://localhost:{OPDS_SERVER_PORT}/opds/browser")
+}
+
+fn opds_catalog_url() -> String {
+    format!("OPDS: http://localhost:{OPDS_SERVER_PORT}/opds")
 }
 
 fn extract_cover_bytes(epub_path: &str, cover_href: Option<String>) -> Option<Vec<u8>> {
@@ -2161,16 +2610,24 @@ async fn load_books(
 
     let (books, total_count) = match query {
         Some(query) => {
-            let count = db.count_search_fts(&query).await
+            let count = db
+                .count_search_fts(&query)
+                .await
                 .map_err(|error| format!("No se pudo contar la búsqueda: {error}"))?;
-            let items = db.search_fts_subset(&query, Some(limit), Some(offset)).await
+            let items = db
+                .search_fts_subset(&query, Some(limit), Some(offset))
+                .await
                 .map_err(|error| format!("No se pudo cargar la búsqueda: {error}"))?;
             (items, count as usize)
         }
         None => {
-            let count = db.count_books().await
+            let count = db
+                .count_books()
+                .await
                 .map_err(|error| format!("No se pudo contar la biblioteca: {error}"))?;
-            let items = db.list_books_subset(Some(limit), Some(offset)).await
+            let items = db
+                .list_books_subset(Some(limit), Some(offset))
+                .await
                 .map_err(|error| format!("No se pudo cargar la biblioteca: {error}"))?;
             (items, count as usize)
         }
@@ -2313,16 +2770,64 @@ async fn save_metadata(
         .map_err(|error| format!("No se pudieron guardar los metadatos: {error}"))
 }
 
-async fn open_book(path: String) -> Result<(), String> {
+async fn delete_book(
+    db: LibraryDb,
+    book_id: i64,
+    delete_file: bool,
+) -> Result<Option<String>, String> {
+    db.delete_book(book_id, delete_file)
+        .await
+        .map_err(|error| format!("No se pudo eliminar el libro: {error}"))
+}
+
+async fn open_book(path: String, app_id: Option<String>) -> Result<(), String> {
+    if let Some(app_id) = app_id {
+        return launch_desktop_app(&app_id, &path)
+            .or_else(|_| launch_with_xdg_open(&path, "abrir"));
+    }
+    launch_with_xdg_open(&path, "abrir")
+}
+
+fn launch_with_xdg_open(path: &str, action: &str) -> Result<(), String> {
     let status = std::process::Command::new("xdg-open")
-        .arg(&path)
+        .arg(path)
         .status()
-        .map_err(|error| format!("No se pudo abrir {path}: {error}"))?;
+        .map_err(|error| format!("No se pudo {action} {path}: {error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("El lector predeterminado rechazó {path}."))
+        Err(format!("La aplicación predeterminada rechazó {path}."))
     }
+}
+
+fn launch_desktop_app(app_id: &str, path: &str) -> Result<(), String> {
+    let status = std::process::Command::new("gtk-launch")
+        .arg(app_id)
+        .arg(path)
+        .status()
+        .map_err(|error| format!("No se pudo iniciar {app_id}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{app_id} rechazó {path}."))
+    }
+}
+
+async fn edit_book(path: String, app_id: Option<String>) -> Result<(), String> {
+    if let Some(app_id) = app_id {
+        return launch_desktop_app(&app_id, &path)
+            .or_else(|_| launch_with_xdg_open(&path, "editar"));
+    }
+
+    let status = std::process::Command::new("rubrica-cosmic")
+        .arg(&path)
+        .status();
+
+    if matches!(status, Ok(status) if status.success()) {
+        return Ok(());
+    }
+
+    launch_with_xdg_open(&path, "editar")
 }
 
 #[cfg(test)]

@@ -908,44 +908,88 @@ impl GutenCore {
         let img_id = "cover-image";
         let img_href = format!("Images/cover.{}", extension);
 
-        // 1. Manejar la imagen vieja si existe (borrar archivo físico para evitar basura)
+        // 1. Leer la nueva imagen antes de borrar la vieja (evita borrar
+        //    accidentalmente el archivo si el usuario está re-usando la misma imagen)
+        let bytes = fs::read(src_path)?;
+
+        // 2. Manejar la imagen vieja si existe
         if self.manifest.contains_key(img_id) {
             self.delete_item(img_id)?;
         }
 
-        // 2. Importar la nueva imagen
-        let bytes = fs::read(src_path)?;
+        // 3. Importar la nueva imagen
         self.add_resource(img_id.to_string(), &bytes, mime_type, &img_href)?;
 
-        // 3. Marcar como cover-image en el manifiesto (Requisito EPUB 3)
-        if let Some(item) = self.manifest.get_mut(img_id) {
-            item.properties = "cover-image".to_string();
+        self.set_cover_from_resource(img_id)
+    }
+
+    /// Establece como portada una imagen que ya pertenece al manifiesto.
+    ///
+    /// A diferencia de [`set_cover`](Self::set_cover), este método no copia,
+    /// renombra ni vuelve a importar la imagen. Conserva el ID y el `href` del
+    /// recurso, marca ese item como `cover-image` y crea o actualiza el XHTML
+    /// de portada para que lo referencie.
+    pub fn set_cover_from_resource(&mut self, image_id: &str) -> Result<()> {
+        let image = self.get_item(image_id)?;
+        if !image.media_type.starts_with("image/") {
+            return Err(GutenError::Manifest(format!(
+                "Resource '{}' is not an image",
+                image_id
+            )));
         }
 
-        // 4. Crear el XHTML de la portada
-        // Usamos una ruta relativa a Text/ que es "../Images/cover.ext"
+        let image_href = image.href.clone();
+        let image_path = self.get_resource_path(image_id)?;
+        if !image_path.is_file() {
+            return Err(GutenError::Manifest(format!(
+                "Image file does not exist: {}",
+                image_href
+            )));
+        }
+
+        // EPUB 3 permite una sola imagen con la propiedad cover-image.
+        for item in self.manifest.values_mut() {
+            let mut properties: Vec<&str> = item
+                .properties
+                .split_whitespace()
+                .filter(|property| *property != "cover-image")
+                .collect();
+            if item.id == image_id {
+                properties.push("cover-image");
+            }
+            item.properties = properties.join(" ");
+        }
+        // Mantener también la referencia EPUB 2 en el modelo.
+        self.cover_image_id = Some(image_id.to_string());
+
+        let relative_image_href = pathdiff::diff_paths(Path::new(&image_href), Path::new("Text"))
+            .unwrap_or_else(|| PathBuf::from(&image_href))
+            .to_slash_lossy()
+            .to_string();
         let xhtml_content = format!(
             r#"<div style="text-align: center; padding: 0; margin: 0;">
-  <img src="../{}" alt="Cover" style="max-width: 100%; height: auto;" />
+  <img src="{}" alt="Cover" style="max-width: 100%; height: auto;" />
 </div>"#,
-            img_href
+            relative_image_href
         );
 
         let doc_id = "cover";
         if self.manifest.contains_key(doc_id) {
-            // Si ya existe, lo actualizamos (esto lo pasará por sanitize_to_xhtml)
             self.save_chapter(doc_id, &xhtml_content)?;
         } else {
-            // Si no existe, lo creamos
             self.add_document(doc_id, &xhtml_content)?;
-            // Y lo ponemos al principio del spine
-            self.spine_insert(doc_id.to_string(), Some(0));
-            // Marcar el XHTML con propiedad cover
-            if let Some(item) = self.manifest.get_mut(doc_id) {
-                item.properties = "cover".to_string();
-            }
         }
 
+        if let Some(item) = self.manifest.get_mut(doc_id) {
+            let mut properties: Vec<&str> = item.properties.split_whitespace().collect();
+            if !properties.contains(&"cover") {
+                properties.push("cover");
+            }
+            item.properties = properties.join(" ");
+        }
+
+        self.spine_remove(doc_id);
+        self.spine_insert(doc_id.to_string(), Some(0));
         Ok(())
     }
 }
@@ -1069,6 +1113,54 @@ mod tests {
     }
 
     #[test]
+    fn test_set_cover_from_existing_resource_does_not_import_again() -> Result<()> {
+        let dir = tempdir()?;
+        let mut core = GutenCore::new_project(dir.path(), "Existing Cover Test", "es")?;
+
+        core.add_resource(
+            "front-photo".to_string(),
+            b"first image",
+            "image/jpeg",
+            "Images/front-photo.jpg",
+        )?;
+        core.add_resource(
+            "alternate".to_string(),
+            b"second image",
+            "image/png",
+            "Images/alternate.png",
+        )?;
+
+        core.set_cover_from_resource("front-photo")?;
+        core.set_cover_from_resource("front-photo")?;
+
+        let selected = core.manifest.get("front-photo").unwrap();
+        assert_eq!(selected.href, "Images/front-photo.jpg");
+        assert!(selected.properties.split_whitespace().any(|p| p == "cover-image"));
+        assert_eq!(fs::read(core.get_resource_path("front-photo")?)?, b"first image");
+        assert!(!core.manifest.contains_key("cover-image"));
+        assert!(!dir.path().join("OEBPS/Images/cover.jpg").exists());
+
+        core.set_cover_from_resource("alternate")?;
+        assert!(
+            !core.manifest["front-photo"]
+                .properties
+                .split_whitespace()
+                .any(|p| p == "cover-image")
+        );
+        assert!(
+            core.manifest["alternate"]
+                .properties
+                .split_whitespace()
+                .any(|p| p == "cover-image")
+        );
+        assert_eq!(core.spine.first().map(String::as_str), Some("cover"));
+
+        let cover = fs::read_to_string(core.get_resource_path("cover")?)?;
+        assert!(cover.contains("../Images/alternate.png"));
+        Ok(())
+    }
+
+    #[test]
     fn test_index_no_ghost_after_delete() -> Result<()> {
         let dir = tempdir()?;
         let mut core = GutenCore::new_project(dir.path(), "Ghost Test", "en")?;
@@ -1166,6 +1258,31 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_epub_replaces_original_with_workdir_changes() -> Result<()> {
+        let dir = tempdir()?;
+        let project_dir = dir.path().join("source");
+        let epub_path = dir.path().join("book.epub");
+
+        let mut source = GutenCore::new_project(&project_dir, "Save Test", "es")?;
+        source.save_chapter("chap1", "<h1>Original</h1>")?;
+        source.export_epub(&epub_path)?;
+        let original_bytes = fs::read(&epub_path)?;
+
+        let mut opened = GutenCore::open_epub(&epub_path)?;
+        opened.save_chapter("chap1", "<h1>Contenido actualizado</h1>")?;
+        opened.save_epub()?;
+
+        let saved_bytes = fs::read(&epub_path)?;
+        assert_ne!(saved_bytes, original_bytes, "the original EPUB was not replaced");
+
+        let reopened = GutenCore::open_epub(&epub_path)?;
+        let chapter = fs::read_to_string(reopened.get_resource_path("chap1")?)?;
+        assert!(chapter.contains("Contenido actualizado"));
+        assert!(!chapter.contains(">Original<"));
         Ok(())
     }
 }

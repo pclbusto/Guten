@@ -1,122 +1,80 @@
 use cosmic::Element;
 use cosmic::iced::Length;
-use cosmic::widget::{self, button, column, container, row, text};
+use cosmic::widget::{self, button, dropdown, row, settings, slider};
 
 use crate::app::Message;
 use crate::settings::{DEFAULT_READER_FONT_SIZE_PT, ReaderSettings};
 use folio::fonts::EpubFont;
 use std::collections::HashSet;
 
+pub fn font_options(epub_fonts: &[EpubFont]) -> Vec<String> {
+    let mut options = vec!["Sans".to_string(), "Serif".to_string()];
+    let mut listed = HashSet::from(["Sans", "Serif"]);
+    for font in epub_fonts {
+        if listed.insert(font.family_name.as_str()) {
+            options.push(font.family_name.clone());
+        }
+    }
+    options
+}
+
 pub fn view_reading_panel<'a>(
-    settings: &'a ReaderSettings,
+    reader_settings: &'a ReaderSettings,
     epub_fonts: &'a [EpubFont],
 ) -> Element<'a, Message> {
-    let profile = settings.current_profile();
-    let theme_text = format!("Tema: {}", profile.name);
-    let current_font = if settings.font_family.is_empty() || settings.font_family == "Sans" {
-        "Sans".to_string()
-    } else {
-        settings.font_family.clone()
+    let themes = vec!["Día".to_string(), "Sepia".to_string(), "Noche".to_string()];
+    let selected_theme = match reader_settings.current_profile.as_str() {
+        "day" => Some(0),
+        "sepia" => Some(1),
+        "night" => Some(2),
+        _ => None,
     };
+    let fonts = font_options(epub_fonts);
+    let selected_font = fonts
+        .iter()
+        .position(|font| font == &reader_settings.font_family)
+        .or(Some(0));
+    let font_percent = reader_settings.font_size_pt / DEFAULT_READER_FONT_SIZE_PT * 100.0;
 
-    let mut font_buttons: Vec<Element<'a, Message>> = vec![
-        button::standard("Sans")
-            .on_press(Message::SelectFont("Sans".into()))
-            .width(Length::Fill)
-            .into(),
-    ];
-    let mut listed_families = HashSet::new();
-    for epub_font in epub_fonts {
-        let name = &epub_font.family_name;
-        if !listed_families.insert(name.as_str()) {
-            continue;
-        }
-        let is_active = &settings.font_family == name;
-        let btn: Element<'a, Message> = if is_active {
-            button::suggested(name.as_str())
-                .on_press(Message::SelectFont(name.clone()))
-                .width(Length::Fill)
-                .into()
-        } else {
-            button::standard(name.as_str())
-                .on_press(Message::SelectFont(name.clone()))
-                .width(Length::Fill)
-                .into()
-        };
-        font_buttons.push(btn);
-    }
-    let font_row = cosmic::widget::Column::with_children(font_buttons).spacing(4);
+    let appearance = settings::section()
+        .title("Apariencia")
+        .add(settings::item(
+            "Modo",
+            dropdown(themes, selected_theme, Message::SelectProfile),
+        ))
+        .add(settings::item(
+            "Fuente",
+            dropdown(fonts, selected_font, Message::SelectFont),
+        ));
+    let typography = settings::section()
+        .title("Texto")
+        .add(settings::item(
+            format!("Tamaño ({font_percent:.0}%)"),
+            slider(60.0..=200.0, font_percent, Message::FontSizeChanged)
+                .step(5.0)
+                .width(Length::Fixed(180.0)),
+        ))
+        .add(settings::item(
+            format!("Márgenes ({:.1})", reader_settings.margin_em),
+            row!(
+                button::standard("−").on_press(Message::MarginDecrease),
+                button::standard("+").on_press(Message::MarginIncrease),
+            )
+            .spacing(4),
+        ));
 
-    container(
-        column!(
-            text::body("Lectura").size(14.0),
-            text::body(theme_text).size(12.0),
-            row!(
-                button::standard("D\u{ed}a")
-                    .on_press(Message::SetProfile("day".into()))
-                    .width(Length::Fill),
-                button::standard("Sepia")
-                    .on_press(Message::SetProfile("sepia".into()))
-                    .width(Length::Fill),
-                button::standard("Noche")
-                    .on_press(Message::SetProfile("night".into()))
-                    .width(Length::Fill)
-            )
-            .spacing(4),
-            widget::Space::new().height(8.0).width(Length::Fill),
-            text::body(format!("Fuente: {}", current_font)).size(12.0),
-            font_row,
-            widget::Space::new().height(8.0).width(Length::Fill),
-            text::body(format!(
-                "Tama\u{f1}o: {:.0}%",
-                settings.font_size_pt / DEFAULT_READER_FONT_SIZE_PT * 100.0
-            ))
-            .size(12.0),
-            row!(
-                button::standard("\u{2212}")
-                    .on_press(Message::FontDecrease)
-                    .width(Length::Fill),
-                button::standard("Aa")
-                    .on_press(Message::FontReset)
-                    .width(Length::Fill),
-                button::standard("+")
-                    .on_press(Message::FontIncrease)
-                    .width(Length::Fill)
-            )
-            .spacing(4),
-            widget::Space::new().height(8.0).width(Length::Fill),
-            text::body(format!("Interlineado: {:.1}", settings.line_height)).size(12.0),
-            row!(
-                button::standard("\u{2212}")
-                    .on_press(Message::LineHeightDecrease)
-                    .width(Length::Fill),
-                button::standard("+")
-                    .on_press(Message::LineHeightIncrease)
-                    .width(Length::Fill)
-            )
-            .spacing(4),
-            widget::Space::new().height(8.0).width(Length::Fill),
-            text::body(format!("M\u{e1}rgenes: {:.1}", settings.margin_em)).size(12.0),
-            row!(
-                button::standard("\u{2212}")
-                    .on_press(Message::MarginDecrease)
-                    .width(Length::Fill),
-                button::standard("+")
-                    .on_press(Message::MarginIncrease)
-                    .width(Length::Fill)
-            )
-            .spacing(4),
-        )
-        .spacing(6)
-        .padding(16),
-    )
-    .width(Length::Fixed(260.0))
+    widget::container(settings::view_column(vec![
+        appearance.into(),
+        typography.into(),
+    ]))
+    .width(Length::Fixed(380.0))
     .height(Length::Fill)
+    .padding(12)
     .style(|theme: &cosmic::Theme| {
-        let c = theme.cosmic();
+        let cosmic = theme.cosmic();
         widget::container::Style {
             background: Some(cosmic::iced::Background::Color(
-                c.background.component.base.into(),
+                cosmic.background.component.base.into(),
             )),
             ..Default::default()
         }

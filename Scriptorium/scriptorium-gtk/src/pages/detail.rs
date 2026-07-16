@@ -30,6 +30,20 @@ pub fn build(db: LibraryDb, book_id: i64, nav_view: adw::NavigationView) -> adw:
     }
     header_bar.pack_end(&btn_read);
 
+    // Botón "Editar" en el header de detalle
+    let btn_edit = gtk::Button::builder()
+        .label("Editar")
+        .build();
+    {
+        let db2 = db.clone();
+        let nav2 = nav_view.clone();
+        btn_edit.connect_clicked(move |_| {
+            let page = crate::pages::editor::build(db2.clone(), book_id, nav2.clone());
+            nav2.push(&page);
+        });
+    }
+    header_bar.pack_end(&btn_edit);
+
     let scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .build();
